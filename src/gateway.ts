@@ -53,7 +53,7 @@ export function createGateway(): Gateway {
     // Admin endpoints
     app.get("/v1/connected-users", (req, res) => {
         const users = Array.from(connections.values()).map(v => ({
-            uuid: v.uuid, name: v.name, accountType: v.accountType, lastSeen: v.lastSeen
+            uuid: v.uuid, name: v.name, accountType: v.accountType, lastSeen: v.lastSeen, roles: v.roles
         }));
         res.json({ success: true, users });
     });
