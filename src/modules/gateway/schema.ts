@@ -14,8 +14,6 @@ export const authMessageSchema = z.object({
     name: z.string().trim().min(1).max(32),
     accountType: z.enum(ACCOUNT_TYPES),
     roles: z.array(roleSchema).max(8).optional(),
-    token: z.string().trim().min(16).max(4096).optional(),
-    sessionId: z.string().trim().min(8).max(256).optional(),
 });
 
 export const pingMessageSchema = z.object({
@@ -41,15 +39,6 @@ export const serverAuthOkSchema = z.object({
     type: z.literal("auth.ok"),
     uuid: z.string(),
     roles: z.array(z.string()),
-    sessionId: z.string().optional(),
-    expiresAt: z.number().optional(),
-});
-
-export const sessionRequestSchema = z.object({
-    uuid: z.string().uuid("uuid must be valid"),
-    name: z.string().trim().min(1).max(32),
-    accountType: z.enum(ACCOUNT_TYPES),
-    roles: z.array(roleSchema).max(8).optional(),
 });
 
 export type AccountRoles = AllowedRole[];
@@ -64,5 +53,5 @@ export function normalizeRoles(input: unknown): AllowedRole[] {
 
 export function normalizeAccountType(input: unknown): AccountType {
     const value = String(input || "").trim().toUpperCase();
-    return (ACCOUNT_TYPES as readonly string[]).includes(value) ? (value as AccountType) : "OFFLINE";
+    return (ACCOUNT_TYPES as readonly string[]).includes(value) ? (value as AccountType) : "LOCAL";
 }

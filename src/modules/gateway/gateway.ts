@@ -12,7 +12,6 @@ import {
     type ClientMessage,
     type AuthMessage,
     type RolesUpdateMessage,
-    sessionRequestSchema,
 } from "./schema.js";
 import {
     markOnline,
@@ -21,9 +20,7 @@ import {
     fetchRoles,
 } from "../presence/service.js";
 import type { ConnectionStore, ConnectionState } from "./state.js";
-import type { AccountType } from "../types/account.js";
 import { firestore } from "../../core/firebase.js";
-import { issueSessionToken, verifySessionToken, revokeSession } from "../auth/session.js";
 
 export interface Gateway {
     wss: WebSocketServer;
@@ -77,37 +74,6 @@ function registerHttpRoutes(app: Express, connections: ConnectionStore, wss: Web
         }));
 
         res.json({ success: true, users });
-    });
-
-    app.post("/v1/session", async (req: Request, res) => {
-        if (!isSessionRequestAuthorized(req)) {
-            return res.status(401).json({ success: false, message: "Unauthorized" });
-        }
-
-        const parsed = sessionRequestSchema.safeParse(req.body);
-        if (!parsed.success) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid payload",
-                issues: parsed.error.issues.map((issue) => ({
-                    path: issue.path.join(".") || "root",
-                    message: issue.message,
-                })),
-            });
-        }
-
-        try {
-            const session = await issueSessionToken({
-                uuid: parsed.data.uuid,
-                name: parsed.data.name,
-                accountType: parsed.data.accountType,
-                rolesHint: parsed.data.roles,
-            });
-            res.json({ success: true, ...session });
-        } catch (error) {
-            logger.error({ err: error }, "Failed to issue session token");
-            res.status(500).json({ success: false, message: "Unable to issue session token" });
-        }
     });
 
     app.post("/v1/broadcast", express.json({ limit: "256kb" }), (req: Request, res) => {
@@ -206,8 +172,11 @@ async function handleAuth(
     connections: ConnectionStore,
     wss: WebSocketServer,
 ) {
-    let uuid = message.uuid || uuidv4();
-    let name = message.name || "Unknown";
+    let uuid = (message.uuid || "").trim();
+    if (!uuid) {
+        uuid = uuidv4();
+    }
+    const name = (message.name || "Unknown").trim() || "Unknown";
     const accountType = normalizeAccountType(message.accountType);
     const providedRoles = normalizeRoles(message.roles);
     const ip = (socket as any).clientIp ?? null;
@@ -223,55 +192,6 @@ async function handleAuth(
         broadcastToAll(wss, { type: "user.leave", uuid: previousState.uuid });
     }
 
-    if (!message.token) {
-        logger.warn({ uuid, ip }, "Authentication rejected: token missing");
-        denyConnection(socket, "TOKEN_REQUIRED");
-        return;
-    }
-
-    const verification = await verifySessionToken(message.token);
-    if (!verification.ok) {
-        logger.warn({ uuid, ip, reason: verification.reason }, "Authentication rejected: token invalid");
-        denyConnection(socket, "TOKEN_INVALID");
-        return;
-    }
-
-    const tokenData = verification.data;
-
-    if (!tokenData) {
-        logger.warn({ uuid, ip }, "Authentication rejected: token payload missing");
-        denyConnection(socket, "TOKEN_INVALID");
-        return;
-    }
-
-    if (tokenData.expiresAt && tokenData.expiresAt <= Date.now()) {
-        logger.warn({ uuid, ip }, "Authentication rejected: token expired");
-        denyConnection(socket, "TOKEN_EXPIRED");
-        return;
-    }
-
-    if (tokenData.uuid && tokenData.uuid !== uuid) {
-        logger.warn({ expected: uuid, token: tokenData.uuid }, "Authentication rejected: uuid mismatch");
-        denyConnection(socket, "UUID_MISMATCH");
-        return;
-    }
-
-    if (message.sessionId && message.sessionId !== tokenData.sessionId) {
-        logger.warn({
-            uuid,
-            providedSessionId: message.sessionId,
-            tokenSessionId: tokenData.sessionId,
-        }, "Authentication rejected: session id mismatch");
-        revokeSession(tokenData.sessionId);
-        denyConnection(socket, "SESSION_MISMATCH");
-        return;
-    }
-
-    const tokenRoles = normalizeRoles(tokenData.roles);
-    if (tokenData.name && tokenData.name.trim().length > 0) {
-        name = tokenData.name.trim();
-    }
-
     let rolesFromDb: AllowedRole[] | undefined;
     try {
         const fetched = await fetchRoles(uuid);
@@ -284,11 +204,9 @@ async function handleAuth(
 
     const effectiveRoles = rolesFromDb?.length
         ? rolesFromDb
-        : tokenRoles.length
-            ? tokenRoles
-            : providedRoles.length
-                ? providedRoles
-                : [DEFAULT_ROLE];
+        : providedRoles.length
+            ? providedRoles
+            : [DEFAULT_ROLE];
 
     const state: ConnectionState = {
         socket,
@@ -299,8 +217,6 @@ async function handleAuth(
         lastSeen: Date.now(),
         isAlive: true,
         ip,
-        sessionId: tokenData.sessionId,
-        tokenExpiresAt: tokenData.expiresAt,
     };
 
     connections.set(socket, state);
@@ -323,8 +239,6 @@ async function handleAuth(
         type: "auth.ok",
         uuid,
         roles: effectiveRoles,
-        sessionId: state.sessionId,
-        expiresAt: state.tokenExpiresAt,
     });
     broadcastToAll(wss, {
         type: "user.join",
@@ -399,15 +313,6 @@ function broadcastToAll(wss: WebSocketServer, payload: unknown) {
     }
 }
 
-function denyConnection(socket: WebSocket, code: string) {
-    safeSend(socket, { type: "auth.error", code });
-    try {
-        socket.close(4003, "Authentication failed");
-    } catch (err) {
-        logger.warn({ err }, "Failed to close socket after auth denial");
-    }
-}
-
 function appHeartbeat(wss: WebSocketServer, connections: ConnectionStore) {
     setInterval(async () => {
         for (const socket of wss.clients) {
@@ -456,19 +361,6 @@ function parseIp(req: http.IncomingMessage): string | null {
 function isAuthorized(req: Request): boolean {
     const headerKey = req.headers["x-admin-key"];
     return typeof headerKey === "string" && headerKey === config.adminKey;
-}
-
-function isSessionRequestAuthorized(req: Request): boolean {
-    const headerKey = req.headers["x-session-key"];
-    if (typeof headerKey === "string" && headerKey === config.auth.sessionApiKey) {
-        return true;
-    }
-    const authHeader = req.headers.authorization;
-    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
-        const token = authHeader.slice(7).trim();
-        return token === config.auth.sessionApiKey;
-    }
-    return false;
 }
 
 function isSecureRequest(req: http.IncomingMessage): boolean {

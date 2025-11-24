@@ -13,9 +13,6 @@ const envSchema = z.object({
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
     RENDER_INTERNAL_PORT: z.coerce.number().int().positive().optional(),
-    SESSION_JWT_SECRET: z.string().min(32, "SESSION_JWT_SECRET must be at least 32 characters"),
-    SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(300),
-    SESSION_API_KEY: z.string().min(16, "SESSION_API_KEY must be at least 16 characters"),
 }).superRefine((data, ctx) => {
     if (!data.WS_PATH.startsWith("/")) {
         ctx.addIssue({
@@ -52,11 +49,6 @@ export const config = {
         projectId: env.FIREBASE_PROJECT_ID,
         clientEmail: env.FIREBASE_CLIENT_EMAIL,
         privateKey: env.FIREBASE_PRIVATE_KEY,
-    },
-    auth: {
-        sessionSecret: env.SESSION_JWT_SECRET,
-        sessionTtlSeconds: env.SESSION_TTL_SECONDS,
-        sessionApiKey: env.SESSION_API_KEY,
     },
 } as const;
 

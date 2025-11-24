@@ -11,8 +11,6 @@ export interface ConnectionState {
     lastSeen: number;
     isAlive: boolean;
     ip: string | null;
-    sessionId?: string;
-    tokenExpiresAt?: number;
 }
 
 export type ConnectionStore = Map<WebSocket, ConnectionState>;

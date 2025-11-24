@@ -36,9 +36,6 @@ FIREBASE_CLIENT_EMAIL=firebase-adminsdk@seu-projeto.iam.gserviceaccount.com
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nCHAVE-PRIVADA\n-----END PRIVATE KEY-----\n"
 RATE_LIMIT_WINDOW_MS=15000
 RATE_LIMIT_MAX=100
-SESSION_JWT_SECRET=chave-jwt-64-caracteres
-SESSION_TTL_SECONDS=300
-SESSION_API_KEY=chave-sessao-para-cliente
 ```
 
 > **Importante:** mantenha `FIREBASE_PRIVATE_KEY` somente no backend. Use grupos de ambiente/segredos no Render (ou equivalente) para injetar esse valor com seguranca.
@@ -53,10 +50,9 @@ SESSION_API_KEY=chave-sessao-para-cliente
 
 ## Fluxo de Autenticacao
 
-1. Cliente obtem token seguro (JWT assinado) e inicia conexao WSS.
-2. Primeiro payload deve ser `auth` com UUID, nome, tipo de conta e roles.
-3. Servidor valida dados, sincroniza roles com Firestore (fonte da verdade) e responde com `auth.ok`.
-4. Eventos subsequentes (`ping`, `roles.update`, etc.) passam por validacao rigorosa para evitar abuso.
+1. Cliente abre conexao WSS e envia payload `auth` com UUID, nome, tipo de conta e roles sugeridas.
+2. Servidor normaliza o payload, aplica roles canonicas do Firestore quando existirem e responde com `auth.ok`.
+3. Eventos subsequentes (`ping`, `roles.update`, etc.) passam por validacao e usam o estado in-memory para manter presenca/roles consistentes.
 
 ## Observabilidade e Seguranca
 
