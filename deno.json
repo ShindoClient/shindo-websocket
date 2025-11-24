@@ -1,0 +1,26 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-env src/index.ts",
+    "dev": "deno run --allow-net --allow-env --watch src/index.ts",
+    "check": "deno check src/index.ts",
+    "fmt": "deno fmt",
+    "lint": "deno lint"
+  },
+  "fmt": {
+    "indentWidth": 4,
+    "lineWidth": 120
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["deno.ns", "dom", "dom.iterable"]
+  },
+  "deploy": {
+    "project": "shindo-websocket",
+    "entrypoint": "src/index.ts"
+  }
+}
