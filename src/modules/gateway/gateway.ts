@@ -17,6 +17,7 @@ import {
 } from "../presence/service.ts";
 import type { ConnectionStore, ConnectionState } from "./state.ts";
 import { firestore } from "../../core/firebase.ts";
+import { persistWebsocketStartTime } from "../health/service.ts";
 
 export interface Gateway {
     connections: ConnectionStore;
@@ -26,6 +27,8 @@ export interface Gateway {
 
 const DEFAULT_ROLE: AllowedRole = "MEMBER";
 const startTime = Date.now();
+let persistedStartTime = startTime;
+let startTimeReady: Promise<void> | null = null;
 const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "content-type, x-admin-key, x-forwarded-for, x-forwarded-proto",
@@ -37,6 +40,7 @@ export function registerGateway(): Gateway {
     const connections: ConnectionStore = new Map();
     const rateLimitState = new Map<string, { count: number; resetAt: number }>();
     appHeartbeat(connections);
+    startTimeReady = syncStartTime();
 
     function broadcast(payload: unknown) {
         broadcastToAll(connections, payload);
@@ -58,11 +62,20 @@ export function registerGateway(): Gateway {
         }
 
         if (url.pathname === "/v1/health" && req.method === "GET") {
+            if (startTimeReady) {
+                try {
+                    await startTimeReady;
+                } catch {
+                    // Already logged inside syncStartTime
+                }
+            }
+            const effectiveStart = persistedStartTime || startTime;
             return json({
                 ok: true,
                 env: config.env,
                 version: Deno.env.get("COMMIT_HASH") || "dev",
-                uptimeMs: Date.now() - startTime,
+                startedAt: new Date(effectiveStart).toISOString(),
+                uptimeMs: Date.now() - effectiveStart,
                 timestamp: new Date().toISOString(),
                 connections: connections.size,
             });
@@ -323,6 +336,18 @@ function broadcastToAll(connections: ConnectionStore, payload: unknown) {
             }
         }
     }
+}
+
+function syncStartTime() {
+    return persistWebsocketStartTime(startTime)
+        .then((persisted) => {
+            if (typeof persisted === "number") {
+                persistedStartTime = persisted;
+            }
+        })
+        .catch((error) => {
+            logger.warn({ err: error }, "Failed to sync websocket start time");
+        });
 }
 
 function appHeartbeat(connections: ConnectionStore) {
