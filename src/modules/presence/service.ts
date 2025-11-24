@@ -1,6 +1,6 @@
-import { firestore } from "../../core/firebase.js";
-import { logger } from "../../core/logger.js";
-import type { AccountType } from "../types/account.js";
+import { firestore } from "../../core/firebase.ts";
+import { logger } from "../../core/logger.ts";
+import type { AccountType } from "../types/account.ts";
 
 const USERS_COLLECTION = "users";
 

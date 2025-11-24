@@ -1,16 +1,17 @@
-import "dotenv/config";
-import { bootstrap } from "./core/app.js";
-import { logger } from "./core/logger.js";
+import { bootstrap } from "./core/app.ts";
+import { logger } from "./core/logger.ts";
 
-bootstrap().catch((error) => {
+try {
+    await bootstrap();
+} catch (error) {
     logger.error({ err: error }, "Failed to bootstrap Shindo gateway");
-    process.exitCode = 1;
+    throw error;
+}
+
+addEventListener("unhandledrejection", (event) => {
+    logger.error({ err: event.reason }, "Unhandled promise rejection");
 });
 
-process.on("unhandledRejection", (reason) => {
-    logger.error({ err: reason }, "Unhandled promise rejection");
-});
-
-process.on("uncaughtException", (error) => {
-    logger.error({ err: error }, "Uncaught exception");
+addEventListener("error", (event) => {
+    logger.error({ err: event.error }, "Uncaught exception");
 });

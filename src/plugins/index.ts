@@ -1,5 +1,5 @@
-import type { AppContext } from "../core/app.js";
-import { logger } from "../core/logger.js";
+import type { AppContext } from "../core/app.ts";
+import { logger } from "../core/logger.ts";
 
 export interface GatewayPlugin {
     name: string;

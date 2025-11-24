@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "npm:zod";
 
 const envSchema = z.object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -12,7 +12,6 @@ const envSchema = z.object({
     FIREBASE_PRIVATE_KEY: z.string().min(1, "FIREBASE_PRIVATE_KEY is required"),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
-    RENDER_INTERNAL_PORT: z.coerce.number().int().positive().optional(),
 }).superRefine((data, ctx) => {
     if (!data.WS_PATH.startsWith("/")) {
         ctx.addIssue({
@@ -23,7 +22,7 @@ const envSchema = z.object({
     }
 });
 
-const parsed = envSchema.safeParse(process.env);
+const parsed = envSchema.safeParse(Deno.env.toObject());
 
 if (!parsed.success) {
     const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "env"}: ${issue.message}`);
@@ -36,7 +35,7 @@ export type AppEnvironment = typeof env;
 
 export const config = {
     env: env.NODE_ENV,
-    port: env.RENDER_INTERNAL_PORT ?? env.PORT,
+    port: env.PORT,
     wsPath: env.WS_PATH,
     adminKey: env.ADMIN_KEY,
     hbInterval: env.WS_HEARTBEAT_INTERVAL,

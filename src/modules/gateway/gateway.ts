@@ -1,9 +1,5 @@
-import type http from "http";
-import express, { type Request, type Express } from "express";
-import { WebSocketServer, WebSocket } from "ws";
-import { v4 as uuidv4 } from "uuid";
-import { config } from "../../core/config.js";
-import { logger } from "../../core/logger.js";
+import { config } from "../../core/config.ts";
+import { logger } from "../../core/logger.ts";
 import {
     clientMessageSchema,
     normalizeRoles,
@@ -12,154 +8,172 @@ import {
     type ClientMessage,
     type AuthMessage,
     type RolesUpdateMessage,
-} from "./schema.js";
+} from "./schema.ts";
 import {
     markOnline,
     updateLastSeen,
     markOffline,
     fetchRoles,
-} from "../presence/service.js";
-import type { ConnectionStore, ConnectionState } from "./state.js";
-import { firestore } from "../../core/firebase.js";
+} from "../presence/service.ts";
+import type { ConnectionStore, ConnectionState } from "./state.ts";
+import { firestore } from "../../core/firebase.ts";
 
 export interface Gateway {
-    wss: WebSocketServer;
     connections: ConnectionStore;
-}
-
-export interface GatewayDependencies {
-    app: Express;
-    server: http.Server;
+    handleRequest(req: Request, info: Deno.ServeHandlerInfo): Promise<Response> | Response;
+    broadcast(payload: unknown): void;
 }
 
 const DEFAULT_ROLE: AllowedRole = "MEMBER";
+const startTime = Date.now();
+const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "content-type, x-admin-key, x-forwarded-for, x-forwarded-proto",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Credentials": "true",
+};
 
-export function registerGateway({ app, server }: GatewayDependencies): Gateway {
-    const wss = new WebSocketServer({
-        server,
-        path: config.wsPath,
-    });
+export function registerGateway(): Gateway {
     const connections: ConnectionStore = new Map();
+    const rateLimitState = new Map<string, { count: number; resetAt: number }>();
+    appHeartbeat(connections);
 
-    app.locals.wss = wss;
+    function broadcast(payload: unknown) {
+        broadcastToAll(connections, payload);
+    }
 
-    registerHttpRoutes(app, connections, wss);
-    registerWebSocketHandlers(wss, connections);
-    return { wss, connections };
-}
-
-function registerHttpRoutes(app: Express, connections: ConnectionStore, wss: WebSocketServer) {
-    app.get("/v1/health", async (_req, res) => {
-        res.json({
-            ok: true,
-            env: config.env,
-            version: process.env.COMMIT_HASH || "dev",
-            uptimeMs: Math.floor(process.uptime() * 1000),
-            timestamp: new Date().toISOString(),
-            connections: connections.size,
-        });
-    });
-
-    app.get("/v1/connected-users", (req: Request, res) => {
-        if (!isAuthorized(req)) {
-            return res.status(401).json({ success: false, message: "Unauthorized" });
+    async function handleRequest(req: Request, info: Deno.ServeHandlerInfo): Promise<Response> {
+        if (req.method === "OPTIONS") {
+            return new Response(null, { status: 204, headers: corsHeaders });
         }
 
-        const users = Array.from(connections.values()).map((connection) => ({
-            uuid: connection.uuid,
-            name: connection.name,
-            accountType: connection.accountType,
-            lastSeen: connection.lastSeen,
-            roles: connection.roles,
-        }));
+        const url = new URL(req.url);
 
-        res.json({ success: true, users });
-    });
-
-    app.post("/v1/broadcast", express.json({ limit: "256kb" }), (req: Request, res) => {
-        if (!isAuthorized(req)) {
-            return res.status(401).json({ success: false, message: "Unauthorized" });
+        if (url.pathname === config.wsPath && req.headers.get("upgrade") === "websocket") {
+            return handleWebSocket(req, info, connections);
         }
 
-        const { type, payload } = req.body || {};
-        if (typeof type !== "string" || !type.trim()) {
-            return res.status(400).json({ success: false, message: "Missing broadcast type" });
+        if (isRateLimited(req, info, rateLimitState)) {
+            return json({ success: false, message: "Too many requests" }, 429);
         }
 
-        broadcastToAll(wss, { type, ...(payload ?? {}) });
-        res.json({ success: true });
-    });
-}
-
-function registerWebSocketHandlers(wss: WebSocketServer, connections: ConnectionStore) {
-    wss.on("connection", async (socket, req) => {
-        const ip = parseIp(req);
-        (socket as any).isAlive = true;
-        (socket as any).clientIp = ip;
-
-        if (!isSecureRequest(req)) {
-            logger.warn({ ip }, "Rejected non-secure WebSocket connection");
-            socket.close(4001, "Insecure connection");
-            return;
+        if (url.pathname === "/v1/health" && req.method === "GET") {
+            return json({
+                ok: true,
+                env: config.env,
+                version: Deno.env.get("COMMIT_HASH") || "dev",
+                uptimeMs: Date.now() - startTime,
+                timestamp: new Date().toISOString(),
+                connections: connections.size,
+            });
         }
 
-        logger.info({ ip }, "WebSocket connection established");
+        if (url.pathname === "/v1/connected-users" && req.method === "GET") {
+            if (!isAuthorized(req)) {
+                return json({ success: false, message: "Unauthorized" }, 401);
+            }
 
-        socket.on("pong", () => {
-            (socket as any).isAlive = true;
-        });
+            const users = Array.from(connections.values()).map((connection) => ({
+                uuid: connection.uuid,
+                name: connection.name,
+                accountType: connection.accountType,
+                lastSeen: connection.lastSeen,
+                roles: connection.roles,
+            }));
 
-        socket.on("message", async (raw) => {
+            return json({ success: true, users });
+        }
+
+        if (url.pathname === "/v1/broadcast" && req.method === "POST") {
+            if (!isAuthorized(req)) {
+                return json({ success: false, message: "Unauthorized" }, 401);
+            }
+
+            let body: unknown;
             try {
-                const parsed = clientMessageSchema.parse(JSON.parse(String(raw)));
-                await handleClientMessage(socket, parsed, connections, wss);
-            } catch (error: any) {
-                logger.warn({ err: error, raw: String(raw) }, "WebSocket message rejected");
-                safeSend(socket, {
-                    type: "error",
-                    code: "INVALID_PAYLOAD",
-                    message: "Invalid message payload",
-                });
+                body = await req.json();
+            } catch {
+                return json({ success: false, message: "Invalid JSON body" }, 400);
             }
-        });
 
-        socket.on("close", async () => {
+            const { type, payload } = (body ?? {}) as Record<string, unknown>;
+            if (typeof type !== "string" || !type.trim()) {
+                return json({ success: false, message: "Missing broadcast type" }, 400);
+            }
+
+            broadcastToAll(connections, { type, ...(payload ?? {}) });
+            return json({ success: true });
+        }
+
+        return new Response("Not found", { status: 404, headers: corsHeaders });
+    }
+
+    return { connections, handleRequest, broadcast };
+}
+
+function handleWebSocket(req: Request, info: Deno.ServeHandlerInfo, connections: ConnectionStore): Response {
+    const ip = parseIp(req, info);
+
+    if (!isSecureRequest(req)) {
+        logger.warn({ ip }, "Rejected non-secure WebSocket connection");
+        return new Response("Insecure connection", { status: 400 });
+    }
+
+    const { socket, response } = Deno.upgradeWebSocket(req);
+    logger.info({ ip }, "WebSocket connection established");
+
+    socket.addEventListener("message", async (event) => {
+        try {
+            const parsed = clientMessageSchema.parse(JSON.parse(String(event.data)));
+            await handleClientMessage(socket, parsed, connections);
             const state = connections.get(socket);
-            if (state) {
-                connections.delete(socket);
-                try {
-                    await markOffline(state.uuid);
-                } catch (error) {
-                    logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline on close");
-                }
-                broadcastToAll(wss, { type: "user.leave", uuid: state.uuid });
-            }
-            logger.info({ ip }, "WebSocket connection closed");
-        });
-
-        socket.on("error", (err) => {
-            logger.warn({ err, ip }, "WebSocket error");
-        });
+            if (state) state.lastSeen = Date.now();
+        } catch (error) {
+            logger.warn({ err: error, raw: String(event.data) }, "WebSocket message rejected");
+            safeSend(socket, {
+                type: "error",
+                code: "INVALID_PAYLOAD",
+                message: "Invalid message payload",
+            });
+        }
     });
 
-    appHeartbeat(wss, connections);
+    socket.addEventListener("close", async () => {
+        const state = connections.get(socket);
+        if (state) {
+            connections.delete(socket);
+            try {
+                await markOffline(state.uuid);
+            } catch (error) {
+                logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline on close");
+            }
+            broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
+        }
+        logger.info({ ip }, "WebSocket connection closed");
+    });
+
+    socket.addEventListener("error", (err) => {
+        logger.warn({ err, ip }, "WebSocket error");
+    });
+
+    (socket as any).clientIp = ip;
+    return response;
 }
 
 async function handleClientMessage(
     socket: WebSocket,
     message: ClientMessage,
     connections: ConnectionStore,
-    wss: WebSocketServer,
 ) {
     switch (message.type) {
         case "auth":
-            await handleAuth(socket, message, connections, wss);
+            await handleAuth(socket, message, connections);
             break;
         case "ping":
             await handlePing(socket, connections);
             break;
         case "roles.update":
-            await handleRolesUpdate(socket, message, connections, wss);
+            await handleRolesUpdate(socket, message, connections);
             break;
         default:
             logger.info({ type: (message as any).type }, "Unhandled WebSocket message type");
@@ -170,11 +184,10 @@ async function handleAuth(
     socket: WebSocket,
     message: AuthMessage,
     connections: ConnectionStore,
-    wss: WebSocketServer,
 ) {
     let uuid = (message.uuid || "").trim();
     if (!uuid) {
-        uuid = uuidv4();
+        uuid = crypto.randomUUID();
     }
     const name = (message.name || "Unknown").trim() || "Unknown";
     const accountType = normalizeAccountType(message.accountType);
@@ -189,7 +202,7 @@ async function handleAuth(
         } catch (error) {
             logger.error({ err: error, uuid: previousState.uuid }, "Failed to mark previous session offline");
         }
-        broadcastToAll(wss, { type: "user.leave", uuid: previousState.uuid });
+        broadcastToAll(connections, { type: "user.leave", uuid: previousState.uuid });
     }
 
     let rolesFromDb: AllowedRole[] | undefined;
@@ -240,7 +253,7 @@ async function handleAuth(
         uuid,
         roles: effectiveRoles,
     });
-    broadcastToAll(wss, {
+    broadcastToAll(connections, {
         type: "user.join",
         uuid,
         name,
@@ -265,7 +278,6 @@ async function handleRolesUpdate(
     socket: WebSocket,
     rolesMessage: RolesUpdateMessage,
     connections: ConnectionStore,
-    wss: WebSocketServer,
 ) {
     const state = connections.get(socket);
     if (!state) return;
@@ -283,7 +295,7 @@ async function handleRolesUpdate(
         logger.error({ err: error, uuid: state.uuid }, "Failed to persist updated roles");
     }
 
-    broadcastToAll(wss, {
+    broadcastToAll(connections, {
         type: "user.roles",
         uuid: state.uuid,
         roles: normalizedRoles,
@@ -300,12 +312,12 @@ function safeSend(socket: WebSocket, message: unknown) {
     }
 }
 
-function broadcastToAll(wss: WebSocketServer, payload: unknown) {
+function broadcastToAll(connections: ConnectionStore, payload: unknown) {
     const message = JSON.stringify(payload);
-    for (const client of wss.clients) {
-        if (client.readyState === WebSocket.OPEN) {
+    for (const socket of connections.keys()) {
+        if (socket.readyState === WebSocket.OPEN) {
             try {
-                client.send(message);
+                socket.send(message);
             } catch (err) {
                 logger.warn({ err }, "Failed to broadcast message");
             }
@@ -313,63 +325,77 @@ function broadcastToAll(wss: WebSocketServer, payload: unknown) {
     }
 }
 
-function appHeartbeat(wss: WebSocketServer, connections: ConnectionStore) {
+function appHeartbeat(connections: ConnectionStore) {
     setInterval(async () => {
-        for (const socket of wss.clients) {
-            const alive = (socket as any).isAlive;
-            if (alive === false) {
-                const state = connections.get(socket);
+        for (const [socket, state] of connections.entries()) {
+            const inactiveFor = Date.now() - state.lastSeen;
+            if (inactiveFor > config.offlineAfter) {
                 connections.delete(socket);
-                socket.terminate();
-                if (state) {
-                    try {
-                        await markOffline(state.uuid);
-                    } catch (error) {
-                        logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline after heartbeat timeout");
-                    }
-                }
-                continue;
-            }
-
-            (socket as any).isAlive = false;
-            try {
-                socket.ping();
-            } catch (err) {
-                logger.warn({ err }, "Failed to send ping frame");
-            }
-
-            const state = connections.get(socket);
-            if (state && Date.now() - state.lastSeen > config.offlineAfter) {
                 try {
                     await markOffline(state.uuid);
                 } catch (error) {
                     logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline due to inactivity");
+                }
+                broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
+                try {
+                    socket.close(4000, "Heartbeat timeout");
+                } catch (err) {
+                    logger.warn({ err }, "Failed to close stale WebSocket");
                 }
             }
         }
     }, config.hbInterval);
 }
 
-function parseIp(req: http.IncomingMessage): string | null {
-    const header = req.headers["x-forwarded-for"];
-    if (Array.isArray(header)) {
-        return header[0] ?? null;
+function parseIp(req: Request, info: Deno.ServeHandlerInfo): string | null {
+    const forwarded = req.headers.get("x-forwarded-for");
+    if (forwarded) {
+        return forwarded.split(",")[0]?.trim() || null;
     }
-    return header ?? req.socket.remoteAddress ?? null;
+    const addr = info.remoteAddr as Deno.NetAddr;
+    return addr?.hostname ?? null;
 }
 
 function isAuthorized(req: Request): boolean {
-    const headerKey = req.headers["x-admin-key"];
+    const headerKey = req.headers.get("x-admin-key");
     return typeof headerKey === "string" && headerKey === config.adminKey;
 }
 
-function isSecureRequest(req: http.IncomingMessage): boolean {
-    const protoHeader = req.headers["x-forwarded-proto"];
-    if (protoHeader) {
-        const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
-        if (proto && proto.toLowerCase() !== "https") {
-            return false;
-        }
+function isSecureRequest(req: Request): boolean {
+    const protoHeader = req.headers.get("x-forwarded-proto");
+    if (protoHeader && protoHeader.toLowerCase() !== "https") {
+        return false;
     }
     return true;
+}
+
+function json(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+        },
+    });
+}
+
+function isRateLimited(
+    req: Request,
+    info: Deno.ServeHandlerInfo,
+    state: Map<string, { count: number; resetAt: number }>,
+): boolean {
+    const addr = parseIp(req, info) ?? "unknown";
+    const now = Date.now();
+    const current = state.get(addr);
+    if (!current || current.resetAt < now) {
+        state.set(addr, { count: 1, resetAt: now + config.rateLimit.windowMs });
+        return false;
+    }
+
+    if (current.count >= config.rateLimit.max) {
+        return true;
+    }
+
+    current.count += 1;
+    return false;
 }

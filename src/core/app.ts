@@ -1,52 +1,22 @@
-import http from "http";
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import { config } from "./config.js";
-import { logger } from "./logger.js";
-import { initFirebase } from "./firebase.js";
-import { registerGateway, type Gateway } from "../modules/gateway/gateway.js";
-import { registerPlugins } from "../plugins/index.js";
+import { config } from "./config.ts";
+import { logger } from "./logger.ts";
+import { initFirebase } from "./firebase.ts";
+import { registerGateway, type Gateway } from "../modules/gateway/gateway.ts";
+import { registerPlugins } from "../plugins/index.ts";
 
 export interface AppContext extends Gateway {
-    app: express.Express;
-    server: http.Server;
+    server: Deno.Server;
 }
 
 export async function bootstrap(): Promise<AppContext> {
     initFirebase();
 
-    const app = express();
-    app.set("trust proxy", 1);
-
-    app.use(helmet({
-        contentSecurityPolicy: false,
-        crossOriginEmbedderPolicy: false,
-    }));
-    app.use(cors({
-        origin: true,
-        credentials: true,
-    }));
-    app.use(express.json({ limit: "1mb" }));
-
-    const limiter = rateLimit({
-        windowMs: config.rateLimit.windowMs,
-        limit: config.rateLimit.max,
-        standardHeaders: true,
-        legacyHeaders: false,
-    });
-    app.use(limiter);
-
-    const server = http.createServer(app);
-    const gateway = registerGateway({ app, server });
-    const context: AppContext = { app, server, ...gateway };
+    const gateway = registerGateway();
+    const server = Deno.serve({ port: config.port, hostname: "0.0.0.0" }, (req, info) => gateway.handleRequest(req, info));
+    const context: AppContext = { ...gateway, server };
 
     await registerPlugins(context);
-
-    server.listen(config.port, () => {
-        logger.info({ port: config.port, path: config.wsPath }, "Gateway listening");
-    });
+    logger.info({ port: config.port, path: config.wsPath }, "Gateway listening on Deno");
 
     return context;
 }

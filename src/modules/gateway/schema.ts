@@ -1,5 +1,5 @@
-import { z } from "zod";
-import { ACCOUNT_TYPES, type AccountType } from "../types/account.js";
+import { z } from "npm:zod";
+import { ACCOUNT_TYPES, type AccountType } from "../types/account.ts";
 
 export const ALLOWED_ROLES = ["STAFF", "DIAMOND", "GOLD", "MEMBER"] as const;
 export type AllowedRole = typeof ALLOWED_ROLES[number];

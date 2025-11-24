@@ -1,27 +1,24 @@
-# Shindo Gateway
+# Shindo Websocket
 
-Servidor HTTP/WebSocket modular responsavel por orquestrar presenca, autenticacao e broadcasting entre o Shindo Client e os servicos auxiliares.
+Servidor HTTP/WebSocket modular responsável por orquestrar presença, autenticação e broadcasting entre o Shindo Client e os serviços auxiliares.
 
-## Visao Geral
+## Visão Geral
 
-- **Runtime**: Node.js 18+, TypeScript, WebSocket (`ws`).
-- **Persistencia**: Firebase Firestore para dados de sessao/presenca.
-- **Seguranca**: Helmet, rate limiting, validacao com Zod e logs estruturados via Pino.
-- **Hospedagem alvo**: Render (compativel com `render.yaml` incluso).
+- Runtime: Deno (compatível com [Deno Deploy](https://deno.com/deploy)).
+- Persistência: Firebase Firestore (API REST via service account).
+- Segurança: Rate limiting in-memory, validação com Zod e logs estruturados no stdout.
+- Hospedagem alvo: Deno.com (Deploy). Sem dependências nativas ou npm com bindings.
 
 ## Estrutura do Projeto
 
 ```
 src/
-  core/               # Bootstrapping, config, logger, cliente Firebase
-  modules/
-    gateway/          # Rotas HTTP + servidor WebSocket
-    presence/         # Operacoes de presenca no Firestore
-    types/            # Tipos compartilhados entre modulos
+  core/               # Bootstrapping, config, logger, cliente Firestore (REST)
+  modules/            # Gateway HTTP/WS + presença
 index.ts              # Ponto de entrada (bootstrap)
 ```
 
-## Variaveis de Ambiente
+## Variáveis de Ambiente
 
 Crie um `.env` baseado em `.env.example` e defina:
 
@@ -38,45 +35,32 @@ RATE_LIMIT_WINDOW_MS=15000
 RATE_LIMIT_MAX=100
 ```
 
-> **Importante:** mantenha `FIREBASE_PRIVATE_KEY` somente no backend. Use grupos de ambiente/segredos no Render (ou equivalente) para injetar esse valor com seguranca.
+> **Importante:** mantenha `FIREBASE_PRIVATE_KEY` somente no backend. Use grupos de ambiente/segredos no Deno Deploy para injetar esse valor com segurança.
 
-## Scripts
+## Rodando Localmente (Deno)
 
-| Comando      | Descricao                                                               |
-| ------------ | ----------------------------------------------------------------------- |
-| `pnpm dev`   | Executa o servidor em modo desenvolvimento (ts-node + nodemon).         |
-| `pnpm build` | Compila o codigo TypeScript para `dist/`.                               |
-| `pnpm start` | Inicia a versao compilada (`node dist/index.js`).                       |
+```
+deno run --allow-net --allow-env src/index.ts
+```
 
-## Fluxo de Autenticacao
+O servidor usa `Deno.serve` e escuta em `PORT` (padrão `8080`) quando executado fora do Deploy.
 
-1. Cliente abre conexao WSS e envia payload `auth` com UUID, nome, tipo de conta e roles sugeridas.
-2. Servidor normaliza o payload, aplica roles canonicas do Firestore quando existirem e responde com `auth.ok`.
-3. Eventos subsequentes (`ping`, `roles.update`, etc.) passam por validacao e usam o estado in-memory para manter presenca/roles consistentes.
+## Endpoints
 
-## Observabilidade e Seguranca
-
-- Logs estruturados com `pino`, prontos para agregacao em plataformas como Logtail, Datadog ou Loki.
-- Rate limiting padrao (100 requisicoes a cada 15s) aplicado em todas as rotas HTTP.
-- Conexoes WebSocket nao seguras (sem HTTPS/TLS) sao rejeitadas automaticamente.
-- Payloads invalidos retornam mensagens neutras para evitar vazamento de detalhes sensiveis.
-
-## Desenvolvimento Local
-
-1. `pnpm install`
-2. Configurar `.env`
-3. `pnpm dev`
-
-O servidor expoe:
-
-- `GET /v1/health` — healthcheck simples (sem necessidade de autenticacao).
+- `GET /v1/health` — healthcheck simples (sem necessidade de autenticação).
 - `GET /v1/connected-users` — requer header `x-admin-key`.
 - `POST /v1/broadcast` — requer header `x-admin-key`.
-- `POST /v1/session` — requer header `x-session-key` (usado pelo launcher/client para emitir tokens JWT).
 - WebSocket em `ws(s)://<host>:<port><WS_PATH>`
 
-## Proximos Passos
+## Observabilidade e Segurança
 
-- Implementar camada de plugins para recursos adicionais (banimentos, matchmaking, notificacoes, etc.).
-- Adicionar metricas Prometheus e tracing com OpenTelemetry.
-- Integrar pipeline CI para lint, testes e scans de seguranca antes do deploy.
+- Logs estruturados no stdout (JSON) pensados para agregação por plataformas de logs do Deno Deploy.
+- Rate limiting padrão (100 requisições a cada 15s) aplicado em todas as rotas HTTP.
+- Conexões WebSocket não seguras (sem HTTPS/TLS) são rejeitadas automaticamente.
+- Payloads inválidos retornam mensagens neutras para evitar vazamento de detalhes sensíveis.
+
+## Próximos Passos
+
+- Implementar camada de plugins para recursos adicionais (banimentos, matchmaking, notificações, etc.).
+- Adicionar métricas Prometheus e tracing com OpenTelemetry.
+- Integrar pipeline CI para lint, testes e scans de segurança antes do deploy.

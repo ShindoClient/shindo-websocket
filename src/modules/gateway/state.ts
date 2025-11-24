@@ -1,6 +1,5 @@
-import type { WebSocket } from "ws";
-import type { AccountType } from "../types/account.js";
-import type { AllowedRole } from "./schema.js";
+import type { AccountType } from "../types/account.ts";
+import type { AllowedRole } from "./schema.ts";
 
 export interface ConnectionState {
     socket: WebSocket;
