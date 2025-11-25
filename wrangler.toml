@@ -1,0 +1,10 @@
+name = "shindo-websocket"
+main = "src/index.ts"
+compatibility_date = "2024-11-06"
+
+[vars]
+WS_PATH = "/websocket"
+WS_HEARTBEAT_INTERVAL = 30000
+OFFLINE_AFTER_MS = 120000
+RATE_LIMIT_WINDOW_MS = 15000
+RATE_LIMIT_MAX = 100

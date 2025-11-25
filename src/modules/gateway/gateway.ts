@@ -1,4 +1,4 @@
-import { config } from "../../core/config.ts";
+import { getConfig } from "../../core/config.ts";
 import { logger } from "../../core/logger.ts";
 import {
     clientMessageSchema,
@@ -21,14 +21,15 @@ import { persistWebsocketStartTime } from "../health/service.ts";
 
 export interface Gateway {
     connections: ConnectionStore;
-    handleRequest(req: Request, info: Deno.ServeHandlerInfo): Promise<Response> | Response;
+    handleRequest(req: Request, meta: RequestMeta): Promise<Response> | Response;
     broadcast(payload: unknown): void;
 }
 
+export interface RequestMeta {
+    clientIp: string | null;
+}
+
 const DEFAULT_ROLE: AllowedRole = "MEMBER";
-const startTime = Date.now();
-let persistedStartTime = startTime;
-let startTimeReady: Promise<void> | null = null;
 const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "content-type, x-admin-key, x-forwarded-for, x-forwarded-proto",
@@ -37,16 +38,23 @@ const corsHeaders = {
 };
 
 export function registerGateway(): Gateway {
+    const config = getConfig();
+    const startTime = Date.now();
+    let persistedStartTime = startTime;
+    let startTimeReady: Promise<void> | null = null;
+
     const connections: ConnectionStore = new Map();
     const rateLimitState = new Map<string, { count: number; resetAt: number }>();
-    appHeartbeat(connections);
-    startTimeReady = syncStartTime();
+    appHeartbeat(connections, config.hbInterval, config.offlineAfter);
+    startTimeReady = syncStartTime(startTime, (value) => {
+        persistedStartTime = value;
+    });
 
     function broadcast(payload: unknown) {
         broadcastToAll(connections, payload);
     }
 
-    async function handleRequest(req: Request, info: Deno.ServeHandlerInfo): Promise<Response> {
+    async function handleRequest(req: Request, meta: RequestMeta): Promise<Response> {
         if (req.method === "OPTIONS") {
             return new Response(null, { status: 204, headers: corsHeaders });
         }
@@ -54,10 +62,10 @@ export function registerGateway(): Gateway {
         const url = new URL(req.url);
 
         if (url.pathname === config.wsPath && req.headers.get("upgrade") === "websocket") {
-            return handleWebSocket(req, info, connections);
+            return handleWebSocket(req, meta, connections);
         }
 
-        if (isRateLimited(req, info, rateLimitState)) {
+        if (isRateLimited(meta, rateLimitState)) {
             return json({ success: false, message: "Too many requests" }, 429);
         }
 
@@ -73,7 +81,7 @@ export function registerGateway(): Gateway {
             return json({
                 ok: true,
                 env: config.env,
-                version: Deno.env.get("COMMIT_HASH") || "dev",
+                version: config.commitHash,
                 startedAt: new Date(effectiveStart).toISOString(),
                 uptimeMs: Date.now() - effectiveStart,
                 timestamp: new Date().toISOString(),
@@ -124,15 +132,23 @@ export function registerGateway(): Gateway {
     return { connections, handleRequest, broadcast };
 }
 
-function handleWebSocket(req: Request, info: Deno.ServeHandlerInfo, connections: ConnectionStore): Response {
-    const ip = parseIp(req, info);
+function handleWebSocket(req: Request, meta: RequestMeta, connections: ConnectionStore): Response {
+    const ip = meta.clientIp;
 
     if (!isSecureRequest(req)) {
         logger.warn({ ip }, "Rejected non-secure WebSocket connection");
         return new Response("Insecure connection", { status: 400 });
     }
 
-    const { socket, response } = Deno.upgradeWebSocket(req);
+    const upgradeHeader = req.headers.get("upgrade");
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    const socket = server;
+    socket.accept();
     logger.info({ ip }, "WebSocket connection established");
 
     socket.addEventListener("message", async (event) => {
@@ -170,7 +186,7 @@ function handleWebSocket(req: Request, info: Deno.ServeHandlerInfo, connections:
     });
 
     (socket as any).clientIp = ip;
-    return response;
+    return new Response(null, { status: 101, webSocket: client });
 }
 
 async function handleClientMessage(
@@ -338,11 +354,11 @@ function broadcastToAll(connections: ConnectionStore, payload: unknown) {
     }
 }
 
-function syncStartTime() {
+function syncStartTime(startTime: number, onPersisted: (value: number) => void) {
     return persistWebsocketStartTime(startTime)
         .then((persisted) => {
             if (typeof persisted === "number") {
-                persistedStartTime = persisted;
+                onPersisted(persisted);
             }
         })
         .catch((error) => {
@@ -350,11 +366,11 @@ function syncStartTime() {
         });
 }
 
-function appHeartbeat(connections: ConnectionStore) {
+function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
     setInterval(async () => {
         for (const [socket, state] of connections.entries()) {
             const inactiveFor = Date.now() - state.lastSeen;
-            if (inactiveFor > config.offlineAfter) {
+            if (inactiveFor > offlineAfterMs) {
                 connections.delete(socket);
                 try {
                     await markOffline(state.uuid);
@@ -369,19 +385,11 @@ function appHeartbeat(connections: ConnectionStore) {
                 }
             }
         }
-    }, config.hbInterval);
-}
-
-function parseIp(req: Request, info: Deno.ServeHandlerInfo): string | null {
-    const forwarded = req.headers.get("x-forwarded-for");
-    if (forwarded) {
-        return forwarded.split(",")[0]?.trim() || null;
-    }
-    const addr = info.remoteAddr as Deno.NetAddr;
-    return addr?.hostname ?? null;
+    }, intervalMs);
 }
 
 function isAuthorized(req: Request): boolean {
+    const config = getConfig();
     const headerKey = req.headers.get("x-admin-key");
     return typeof headerKey === "string" && headerKey === config.adminKey;
 }
@@ -405,11 +413,11 @@ function json(body: unknown, status = 200) {
 }
 
 function isRateLimited(
-    req: Request,
-    info: Deno.ServeHandlerInfo,
+    meta: RequestMeta,
     state: Map<string, { count: number; resetAt: number }>,
 ): boolean {
-    const addr = parseIp(req, info) ?? "unknown";
+    const config = getConfig();
+    const addr = meta.clientIp ?? "unknown";
     const now = Date.now();
     const current = state.get(addr);
     if (!current || current.resetAt < now) {

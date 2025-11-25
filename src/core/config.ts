@@ -1,4 +1,4 @@
-import { z } from "npm:zod";
+import { z } from "zod";
 
 const envSchema = z.object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -12,6 +12,8 @@ const envSchema = z.object({
     FIREBASE_PRIVATE_KEY: z.string().min(1, "FIREBASE_PRIVATE_KEY is required"),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+    LOG_LEVEL: z.string().trim().optional(),
+    COMMIT_HASH: z.string().trim().optional(),
 }).superRefine((data, ctx) => {
     if (!data.WS_PATH.startsWith("/")) {
         ctx.addIssue({
@@ -22,33 +24,79 @@ const envSchema = z.object({
     }
 });
 
-const parsed = envSchema.safeParse(Deno.env.toObject());
-
-if (!parsed.success) {
-    const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "env"}: ${issue.message}`);
-    throw new Error(`Invalid environment configuration:\n${issues.join("\n")}`);
+export interface EnvBindings {
+    NODE_ENV?: string;
+    PORT?: string | number;
+    WS_PATH?: string;
+    ADMIN_KEY?: string;
+    WS_HEARTBEAT_INTERVAL?: string | number;
+    OFFLINE_AFTER_MS?: string | number;
+    FIREBASE_PROJECT_ID?: string;
+    FIREBASE_CLIENT_EMAIL?: string;
+    FIREBASE_PRIVATE_KEY?: string;
+    RATE_LIMIT_WINDOW_MS?: string | number;
+    RATE_LIMIT_MAX?: string | number;
+    LOG_LEVEL?: string;
+    COMMIT_HASH?: string;
 }
 
-const env = parsed.data;
-
-export type AppEnvironment = typeof env;
-
-export const config = {
-    env: env.NODE_ENV,
-    port: env.PORT,
-    wsPath: env.WS_PATH,
-    adminKey: env.ADMIN_KEY,
-    hbInterval: env.WS_HEARTBEAT_INTERVAL,
-    offlineAfter: env.OFFLINE_AFTER_MS,
+export interface AppConfig {
+    env: "development" | "test" | "production";
+    port: number;
+    wsPath: string;
+    adminKey: string;
+    hbInterval: number;
+    offlineAfter: number;
     rateLimit: {
-        windowMs: env.RATE_LIMIT_WINDOW_MS,
-        max: env.RATE_LIMIT_MAX,
-    },
+        windowMs: number;
+        max: number;
+    };
     firebase: {
-        projectId: env.FIREBASE_PROJECT_ID,
-        clientEmail: env.FIREBASE_CLIENT_EMAIL,
-        privateKey: env.FIREBASE_PRIVATE_KEY,
-    },
-} as const;
+        projectId: string;
+        clientEmail: string;
+        privateKey: string;
+    };
+    logLevel?: string;
+    commitHash: string;
+}
 
-export type AppConfig = typeof config;
+let cachedConfig: AppConfig | null = null;
+
+export function loadConfig(env: EnvBindings): AppConfig {
+    const parsed = envSchema.safeParse(env);
+
+    if (!parsed.success) {
+        const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "env"}: ${issue.message}`);
+        throw new Error(`Invalid environment configuration:\n${issues.join("\n")}`);
+    }
+
+    const data = parsed.data;
+    cachedConfig = {
+        env: data.NODE_ENV,
+        port: data.PORT,
+        wsPath: data.WS_PATH,
+        adminKey: data.ADMIN_KEY,
+        hbInterval: data.WS_HEARTBEAT_INTERVAL,
+        offlineAfter: data.OFFLINE_AFTER_MS,
+        rateLimit: {
+            windowMs: data.RATE_LIMIT_WINDOW_MS,
+            max: data.RATE_LIMIT_MAX,
+        },
+        firebase: {
+            projectId: data.FIREBASE_PROJECT_ID,
+            clientEmail: data.FIREBASE_CLIENT_EMAIL,
+            privateKey: data.FIREBASE_PRIVATE_KEY,
+        },
+        logLevel: data.LOG_LEVEL,
+        commitHash: data.COMMIT_HASH ?? "dev",
+    } as const;
+
+    return cachedConfig;
+}
+
+export function getConfig(): AppConfig {
+    if (!cachedConfig) {
+        throw new Error("Config not initialized. Call loadConfig(env) first.");
+    }
+    return cachedConfig;
+}

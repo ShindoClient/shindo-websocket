@@ -7,8 +7,7 @@ const levelOrder: Record<LogLevel, number> = {
     error: 40,
 };
 
-const envLevel = (Deno.env.get("LOG_LEVEL") ?? (Deno.env.get("NODE_ENV") === "production" ? "info" : "debug")).toLowerCase();
-const currentLevel: LogLevel = ["debug", "info", "warn", "error"].includes(envLevel) ? envLevel as LogLevel : "info";
+let currentLevel: LogLevel = "info";
 
 function shouldLog(level: LogLevel): boolean {
     return levelOrder[level] >= levelOrder[currentLevel];
@@ -28,6 +27,15 @@ function normalize(data: unknown): Record<string, unknown> {
     } catch {
         return { data: String(data) };
     }
+}
+
+export function configureLogger(level?: string | null, runtimeEnv?: string) {
+    const normalized = (level || "").toLowerCase();
+    if (normalized === "debug" || normalized === "info" || normalized === "warn" || normalized === "error") {
+        currentLevel = normalized;
+        return;
+    }
+    currentLevel = runtimeEnv === "production" ? "info" : "debug";
 }
 
 export const logger = {

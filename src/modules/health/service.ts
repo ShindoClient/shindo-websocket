@@ -1,16 +1,16 @@
-import { config } from "../../core/config.ts";
+import { getConfig } from "../../core/config.ts";
 import { firestore } from "../../core/firebase.ts";
 import { logger } from "../../core/logger.ts";
 
 const HEALTH_COLLECTION = "health";
-const HEALTH_DOCUMENT_ID = config.env === "production" ? "websocket" : `websocket-${config.env}`;
 
 async function readPersistedStartTime(): Promise<number | null> {
     const client = firestore();
+    const docId = getHealthDocumentId();
     try {
         const snapshot = await client
             .collection(HEALTH_COLLECTION)
-            .doc(HEALTH_DOCUMENT_ID)
+            .doc(docId)
             .get();
 
         if (!snapshot.exists) {
@@ -31,14 +31,16 @@ export async function persistWebsocketStartTime(startTimeMs: number): Promise<nu
     const client = firestore();
     const startedAt = new Date(startTimeMs).toISOString();
     const now = new Date().toISOString();
+    const docId = getHealthDocumentId();
+    const { env } = getConfig();
 
     try {
         await client
             .collection(HEALTH_COLLECTION)
-            .doc(HEALTH_DOCUMENT_ID)
+            .doc(docId)
             .set(
                 {
-                    env: config.env,
+                    env,
                     started_at: startedAt,
                     last_update: now,
                 },
@@ -54,4 +56,9 @@ export async function persistWebsocketStartTime(startTimeMs: number): Promise<nu
 
 export async function getPersistedStartTime(): Promise<number | null> {
     return readPersistedStartTime();
+}
+
+function getHealthDocumentId(): string {
+    const { env } = getConfig();
+    return env === "production" ? "websocket" : `websocket-${env}`;
 }

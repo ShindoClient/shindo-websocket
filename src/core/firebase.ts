@@ -1,7 +1,7 @@
-import { config } from "./config.ts";
+import { getConfig } from "./config.ts";
 import { logger } from "./logger.ts";
 
-const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${config.firebase.projectId}/databases/(default)/documents`;
+let firestoreBase: string | null = null;
 
 interface AccessToken {
     token: string;
@@ -15,6 +15,7 @@ function normalizePrivateKey(key: string): string {
 }
 
 async function getAccessToken(): Promise<string> {
+    const { firebase } = getConfig();
     const now = Date.now();
     if (cachedToken && cachedToken.expiresAt > now + 60_000) {
         return cachedToken.token;
@@ -22,7 +23,7 @@ async function getAccessToken(): Promise<string> {
 
     const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
     const claims = {
-        iss: config.firebase.clientEmail,
+        iss: firebase.clientEmail,
         scope: "https://www.googleapis.com/auth/datastore",
         aud: "https://oauth2.googleapis.com/token",
         exp: Math.floor(now / 1000) + 3600,
@@ -30,7 +31,7 @@ async function getAccessToken(): Promise<string> {
     };
     const payload = base64UrlEncode(JSON.stringify(claims));
     const unsigned = `${header}.${payload}`;
-    const signature = await signWithServiceAccount(unsigned, normalizePrivateKey(config.firebase.privateKey));
+    const signature = await signWithServiceAccount(unsigned, normalizePrivateKey(firebase.privateKey));
     const assertion = `${unsigned}.${signature}`;
 
     const response = await fetch("https://oauth2.googleapis.com/token", {
@@ -132,7 +133,7 @@ function decodeFields(fields: Record<string, any>): Record<string, unknown> {
 
 async function patchDocument(collection: string, docId: string, data: Record<string, FirestoreValue>) {
     const token = await getAccessToken();
-    const url = new URL(`${FIRESTORE_BASE}/${collection}/${docId}`);
+    const url = new URL(`${getFirestoreBase()}/${collection}/${docId}`);
     for (const key of Object.keys(data)) {
         url.searchParams.append("updateMask.fieldPaths", key);
     }
@@ -155,7 +156,7 @@ async function patchDocument(collection: string, docId: string, data: Record<str
 
 async function getDocument(collection: string, docId: string): Promise<Record<string, unknown> | null> {
     const token = await getAccessToken();
-    const response = await fetch(`${FIRESTORE_BASE}/${collection}/${docId}`, {
+    const response = await fetch(`${getFirestoreBase()}/${collection}/${docId}`, {
         headers: { Authorization: `Bearer ${token}` },
     });
 
@@ -218,4 +219,12 @@ export function firestore(): FirestoreClient {
         throw new Error("Firebase not initialized. Call initFirebase() first.");
     }
     return firestoreClient;
+}
+
+function getFirestoreBase(): string {
+    if (!firestoreBase) {
+        const { firebase } = getConfig();
+        firestoreBase = `https://firestore.googleapis.com/v1/projects/${firebase.projectId}/databases/(default)/documents`;
+    }
+    return firestoreBase;
 }
