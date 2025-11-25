@@ -10,6 +10,10 @@ id = "514e2e4009a84d3ab572c1ed9c0fe362"
 name = "PRESENCE_DO"
 class_name = "PresenceCoordinator"
 
+[[migrations]]
+tag = "v1-presence-do"
+new_classes = ["PresenceCoordinator"]
+
 [vars]
 WS_PATH = "/websocket"
 WS_HEARTBEAT_INTERVAL = 30000
