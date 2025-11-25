@@ -78,6 +78,7 @@ export function registerGateway(): Gateway {
                 }
             }
             const effectiveStart = persistedStartTime || startTime;
+            const uniqueUsers = new Set(Array.from(connections.values()).map((state) => state.uuid)).size;
             return json({
                 ok: true,
                 env: config.env,
@@ -86,6 +87,7 @@ export function registerGateway(): Gateway {
                 uptimeMs: Date.now() - effectiveStart,
                 timestamp: new Date().toISOString(),
                 connections: connections.size,
+                uniqueUsers,
             });
         }
 
@@ -94,15 +96,24 @@ export function registerGateway(): Gateway {
                 return json({ success: false, message: "Unauthorized" }, 401);
             }
 
-            const users = Array.from(connections.values()).map((connection) => ({
+            const deduped = new Map<string, ConnectionState>();
+            for (const state of connections.values()) {
+                const current = deduped.get(state.uuid);
+                if (!current || current.lastSeen < state.lastSeen) {
+                    deduped.set(state.uuid, state);
+                }
+            }
+
+            const users = Array.from(deduped.values()).map((connection) => ({
                 uuid: connection.uuid,
                 name: connection.name,
                 accountType: connection.accountType,
                 lastSeen: connection.lastSeen,
+                connectedAt: connection.connectedAt,
                 roles: connection.roles,
             }));
 
-            return json({ success: true, users });
+            return json({ success: true, users, connections: connections.size });
         }
 
         if (url.pathname === "/v1/broadcast" && req.method === "POST") {
@@ -156,7 +167,10 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
             const parsed = clientMessageSchema.parse(JSON.parse(String(event.data)));
             await handleClientMessage(socket, parsed, connections);
             const state = connections.get(socket);
-            if (state) state.lastSeen = Date.now();
+            if (state) {
+                state.lastSeen = Date.now();
+                state.isAlive = true;
+            }
         } catch (error) {
             logger.warn({ err: error, raw: String(event.data) }, "WebSocket message rejected");
             safeSend(socket, {
@@ -169,15 +183,7 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
 
     socket.addEventListener("close", async (event) => {
         const state = connections.get(socket);
-        if (state) {
-            connections.delete(socket);
-            try {
-                await markOffline(state.uuid);
-            } catch (error) {
-                logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline on close");
-            }
-            broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
-        }
+        await cleanupConnection(socket, state, connections, "client_close");
         logger.info({ ip, code: event.code, reason: event.reason, clean: event.wasClean }, "WebSocket connection closed");
     });
 
@@ -256,7 +262,9 @@ async function handleAuth(
         name,
         roles: effectiveRoles,
         accountType,
+        connectedAt: Date.now(),
         lastSeen: Date.now(),
+        lastKeepAliveAt: Date.now(),
         isAlive: true,
         ip,
     };
@@ -295,6 +303,7 @@ async function handlePing(socket: WebSocket, connections: ConnectionStore) {
     if (!state) return;
 
     state.lastSeen = Date.now();
+    state.isAlive = true;
     try {
         await updateLastSeen(state.uuid);
     } catch (error) {
@@ -354,6 +363,35 @@ function broadcastToAll(connections: ConnectionStore, payload: unknown) {
     }
 }
 
+async function cleanupConnection(
+    socket: WebSocket,
+    state: ConnectionState | undefined,
+    connections: ConnectionStore,
+    reason: string,
+    closeCode?: number,
+) {
+    if (!state) return;
+
+    connections.delete(socket);
+    state.isAlive = false;
+
+    try {
+        await markOffline(state.uuid);
+    } catch (error) {
+        logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline");
+    }
+
+    broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
+
+    if (closeCode) {
+        try {
+            socket.close(closeCode, reason || "closing");
+        } catch (err) {
+            logger.warn({ err, uuid: state.uuid }, "Failed to close WebSocket during cleanup");
+        }
+    }
+}
+
 function syncStartTime(startTime: number, onPersisted: (value: number) => void) {
     return persistWebsocketStartTime(startTime)
         .then((persisted) => {
@@ -367,44 +405,47 @@ function syncStartTime(startTime: number, onPersisted: (value: number) => void) 
 }
 
 function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
-    // Send a lightweight keepalive so Cloudflare does not drop idle sockets.
-    // Using a dedicated type to avoid conflating with business messages.
+    // Keep sockets warm for Cloudflare while still enforcing liveness.
     const keepAlivePayload = JSON.stringify({ type: "server.keepalive" });
-    const keepAliveEveryMs = 5_000; // Cloudflare closes idle sockets quickly; keep it under 10s.
+    // Cloudflare tends to drop idle sockets quickly, so clamp to <=10s regardless of config.
+    const tickEveryMs = Math.max(5_000, Math.min(intervalMs, 10_000));
+    let ticking = false;
 
-    setInterval(async () => {
-        const now = Date.now();
-        for (const [socket, state] of connections.entries()) {
-            if (socket.readyState === WebSocket.OPEN) {
-                const sinceLast = now - state.lastSeen;
-                // Proactively send a small frame to keep the tunnel alive.
-                if (sinceLast >= keepAliveEveryMs - 1000) {
+    const tick = async () => {
+        if (ticking) return;
+        ticking = true;
+        try {
+            const now = Date.now();
+            for (const [socket, state] of connections.entries()) {
+                if (socket.readyState !== WebSocket.OPEN) {
+                    await cleanupConnection(socket, state, connections, "socket_not_open", 4001);
+                    continue;
+                }
+
+                const inactiveFor = now - state.lastSeen;
+                if (inactiveFor > offlineAfterMs) {
+                    await cleanupConnection(socket, state, connections, "inactivity_timeout", 4400);
+                    continue;
+                }
+
+                if (now - state.lastKeepAliveAt >= tickEveryMs - 250) {
                     try {
                         socket.send(keepAlivePayload);
-                        state.lastSeen = Date.now();
+                        state.lastKeepAliveAt = now;
                     } catch (err) {
-                        logger.warn({ err }, "Failed to send keepalive");
+                        logger.warn({ err, uuid: state.uuid }, "Failed to send keepalive; closing socket");
+                        await cleanupConnection(socket, state, connections, "keepalive_failed", 4401);
                     }
                 }
             }
-
-            const inactiveFor = Date.now() - state.lastSeen;
-            if (inactiveFor > offlineAfterMs) {
-                connections.delete(socket);
-                try {
-                    await markOffline(state.uuid);
-                } catch (error) {
-                    logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline due to inactivity");
-                }
-                broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
-                try {
-                    socket.close(4000, "Heartbeat timeout");
-                } catch (err) {
-                    logger.warn({ err }, "Failed to close stale WebSocket");
-                }
-            }
+        } finally {
+            ticking = false;
         }
-    }, keepAliveEveryMs);
+    };
+
+    setInterval(() => {
+        void tick();
+    }, tickEveryMs);
 }
 
 function isAuthorized(req: Request): boolean {

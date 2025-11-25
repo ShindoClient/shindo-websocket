@@ -18,5 +18,7 @@ export interface ConnectionState {
     roles: string[];
     accountType: AccountType;
     lastSeen: number;
+    connectedAt: number;
+    lastKeepAliveAt: number;
     isAlive: boolean;
 }

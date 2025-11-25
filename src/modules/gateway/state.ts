@@ -8,6 +8,8 @@ export interface ConnectionState {
     roles: AllowedRole[];
     accountType: AccountType;
     lastSeen: number;
+    connectedAt: number;
+    lastKeepAliveAt: number;
     isAlive: boolean;
     ip: string | null;
 }
