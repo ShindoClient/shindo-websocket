@@ -367,8 +367,10 @@ function syncStartTime(startTime: number, onPersisted: (value: number) => void) 
 }
 
 function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
-    const keepAlivePayload = JSON.stringify({ type: "pong" });
-    const keepAliveEveryMs = Math.min(intervalMs, 10_000); // Cloudflare tends to drop idle sockets >15s
+    // Send a lightweight keepalive so Cloudflare does not drop idle sockets.
+    // Using a dedicated type to avoid conflating with business messages.
+    const keepAlivePayload = JSON.stringify({ type: "server.keepalive" });
+    const keepAliveEveryMs = 5_000; // Cloudflare closes idle sockets quickly; keep it under 10s.
 
     setInterval(async () => {
         const now = Date.now();
