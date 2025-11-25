@@ -7,9 +7,6 @@ const envSchema = z.object({
     ADMIN_KEY: z.string().min(16, "ADMIN_KEY must be at least 16 characters long").default("changeme-admin-key"),
     WS_HEARTBEAT_INTERVAL: z.coerce.number().int().positive().default(30000),
     OFFLINE_AFTER_MS: z.coerce.number().int().positive().default(120000),
-    FIREBASE_PROJECT_ID: z.string().min(1, "FIREBASE_PROJECT_ID is required"),
-    FIREBASE_CLIENT_EMAIL: z.string().email("FIREBASE_CLIENT_EMAIL must be a valid email"),
-    FIREBASE_PRIVATE_KEY: z.string().min(1, "FIREBASE_PRIVATE_KEY is required"),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
     LOG_LEVEL: z.string().trim().optional(),
@@ -31,9 +28,6 @@ export interface EnvBindings {
     ADMIN_KEY?: string;
     WS_HEARTBEAT_INTERVAL?: string | number;
     OFFLINE_AFTER_MS?: string | number;
-    FIREBASE_PROJECT_ID?: string;
-    FIREBASE_CLIENT_EMAIL?: string;
-    FIREBASE_PRIVATE_KEY?: string;
     RATE_LIMIT_WINDOW_MS?: string | number;
     RATE_LIMIT_MAX?: string | number;
     LOG_LEVEL?: string;
@@ -50,11 +44,6 @@ export interface AppConfig {
     rateLimit: {
         windowMs: number;
         max: number;
-    };
-    firebase: {
-        projectId: string;
-        clientEmail: string;
-        privateKey: string;
     };
     logLevel?: string;
     commitHash: string;
@@ -81,11 +70,6 @@ export function loadConfig(env: EnvBindings): AppConfig {
         rateLimit: {
             windowMs: data.RATE_LIMIT_WINDOW_MS,
             max: data.RATE_LIMIT_MAX,
-        },
-        firebase: {
-            projectId: data.FIREBASE_PROJECT_ID,
-            clientEmail: data.FIREBASE_CLIENT_EMAIL,
-            privateKey: data.FIREBASE_PRIVATE_KEY,
         },
         logLevel: data.LOG_LEVEL,
         commitHash: data.COMMIT_HASH ?? "dev",

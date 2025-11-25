@@ -9,15 +9,10 @@ import {
     type AuthMessage,
     type RolesUpdateMessage,
 } from "./schema.ts";
-import {
-    markOnline,
-    updateLastSeen,
-    markOffline,
-    fetchRoles,
-} from "../presence/service.ts";
+import { createPresenceClient, type PresenceClient, type PresenceBindings } from "../presence/service.ts";
 import type { ConnectionStore, ConnectionState } from "./state.ts";
-import { firestore } from "../../core/firebase.ts";
-import { persistWebsocketStartTime } from "../health/service.ts";
+import { persistWebsocketStartTime, type HealthBindings } from "../health/service.ts";
+import type { EnvBindings } from "../../core/config.ts";
 
 export interface Gateway {
     connections: ConnectionStore;
@@ -37,16 +32,19 @@ const corsHeaders = {
     "Access-Control-Allow-Credentials": "true",
 };
 
-export function registerGateway(): Gateway {
+type GatewayEnv = EnvBindings & PresenceBindings & HealthBindings;
+
+export function registerGateway(env: GatewayEnv): Gateway {
     const config = getConfig();
+    const presence: PresenceClient = createPresenceClient(env);
     const startTime = Date.now();
     let persistedStartTime = startTime;
     let startTimeReady: Promise<void> | null = null;
 
     const connections: ConnectionStore = new Map();
     const rateLimitState = new Map<string, { count: number; resetAt: number }>();
-    appHeartbeat(connections, config.hbInterval, config.offlineAfter);
-    startTimeReady = syncStartTime(startTime, (value) => {
+    appHeartbeat(connections, config.hbInterval, config.offlineAfter, presence);
+    startTimeReady = syncStartTime(env, startTime, (value) => {
         persistedStartTime = value;
     });
 
@@ -62,7 +60,7 @@ export function registerGateway(): Gateway {
         const url = new URL(req.url);
 
         if (url.pathname === config.wsPath && req.headers.get("upgrade") === "websocket") {
-            return handleWebSocket(req, meta, connections);
+            return handleWebSocket(req, meta, connections, presence);
         }
 
         if (isRateLimited(meta, rateLimitState)) {
@@ -78,6 +76,10 @@ export function registerGateway(): Gateway {
                 }
             }
             const effectiveStart = persistedStartTime || startTime;
+            const onlineUsers = await presence.countOnlineUsers().catch((error) => {
+                logger.warn({ err: error }, "Failed to count online users from presence DO");
+                return null;
+            });
             const uniqueUsers = new Set(Array.from(connections.values()).map((state) => state.uuid)).size;
             return json({
                 ok: true,
@@ -87,6 +89,7 @@ export function registerGateway(): Gateway {
                 uptimeMs: Date.now() - effectiveStart,
                 timestamp: new Date().toISOString(),
                 connections: connections.size,
+                onlineUsers: onlineUsers ?? undefined,
                 uniqueUsers,
             });
         }
@@ -94,6 +97,21 @@ export function registerGateway(): Gateway {
         if (url.pathname === "/v1/connected-users" && req.method === "GET") {
             if (!isAuthorized(req)) {
                 return json({ success: false, message: "Unauthorized" }, 401);
+            }
+
+            try {
+                const usersFromDb = await presence.fetchOnlineUsers(500);
+                const users = usersFromDb.map((user) => ({
+                    uuid: user.uuid,
+                    name: user.name,
+                    accountType: user.accountType,
+                    lastSeen: normalizeDate(user.last_seen),
+                    connectedAt: normalizeDate(user.last_join),
+                    roles: user.roles,
+                }));
+                return json({ success: true, users, connections: users.length });
+            } catch (error) {
+                logger.error({ err: error }, "Failed to fetch online users from presence DO, falling back to in-memory map");
             }
 
             const deduped = new Map<string, ConnectionState>();
@@ -143,7 +161,12 @@ export function registerGateway(): Gateway {
     return { connections, handleRequest, broadcast };
 }
 
-function handleWebSocket(req: Request, meta: RequestMeta, connections: ConnectionStore): Response {
+function handleWebSocket(
+    req: Request,
+    meta: RequestMeta,
+    connections: ConnectionStore,
+    presence: PresenceClient,
+): Response {
     const ip = meta.clientIp;
 
     if (!isSecureRequest(req)) {
@@ -165,7 +188,7 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
     socket.addEventListener("message", async (event) => {
         try {
             const parsed = clientMessageSchema.parse(JSON.parse(String(event.data)));
-            await handleClientMessage(socket, parsed, connections);
+            await handleClientMessage(socket, parsed, connections, presence);
             const state = connections.get(socket);
             if (state) {
                 state.lastSeen = Date.now();
@@ -183,7 +206,7 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
 
     socket.addEventListener("close", async (event) => {
         const state = connections.get(socket);
-        await cleanupConnection(socket, state, connections, "client_close");
+        await cleanupConnection(socket, state, connections, presence, "client_close");
         logger.info({ ip, code: event.code, reason: event.reason, clean: event.wasClean }, "WebSocket connection closed");
     });
 
@@ -199,16 +222,17 @@ async function handleClientMessage(
     socket: WebSocket,
     message: ClientMessage,
     connections: ConnectionStore,
+    presence: PresenceClient,
 ) {
     switch (message.type) {
         case "auth":
-            await handleAuth(socket, message, connections);
+            await handleAuth(socket, message, connections, presence);
             break;
         case "ping":
-            await handlePing(socket, connections);
+            await handlePing(socket, connections, presence);
             break;
         case "roles.update":
-            await handleRolesUpdate(socket, message, connections);
+            await handleRolesUpdate(socket, message, connections, presence);
             break;
         default:
             logger.info({ type: (message as any).type }, "Unhandled WebSocket message type");
@@ -219,6 +243,7 @@ async function handleAuth(
     socket: WebSocket,
     message: AuthMessage,
     connections: ConnectionStore,
+    presence: PresenceClient,
 ) {
     let uuid = (message.uuid || "").trim();
     if (!uuid) {
@@ -233,7 +258,7 @@ async function handleAuth(
 
     if (previousState && previousState.uuid && previousState.uuid !== uuid) {
         try {
-            await markOffline(previousState.uuid);
+            await presence.markOffline(previousState.uuid);
         } catch (error) {
             logger.error({ err: error, uuid: previousState.uuid }, "Failed to mark previous session offline");
         }
@@ -242,12 +267,12 @@ async function handleAuth(
 
     let rolesFromDb: AllowedRole[] | undefined;
     try {
-        const fetched = await fetchRoles(uuid);
+        const fetched = await presence.fetchRoles(uuid);
         if (fetched?.length) {
             rolesFromDb = normalizeRoles(fetched);
         }
     } catch (error) {
-        logger.error({ err: error, uuid }, "Failed to fetch roles from Firestore");
+        logger.error({ err: error, uuid }, "Failed to fetch roles from presence storage");
     }
 
     const effectiveRoles = rolesFromDb?.length
@@ -271,19 +296,15 @@ async function handleAuth(
 
     connections.set(socket, state);
 
-    try {
-        await markOnline(
-            {
-                uuid,
-                name,
-                roles: effectiveRoles,
-                accountType,
-            },
-            rolesFromDb?.length ? undefined : effectiveRoles,
-        );
-    } catch (error) {
+    await presence.markOnline({
+        uuid,
+        name,
+        roles: effectiveRoles,
+        accountType,
+        ip,
+    }).catch((error) => {
         logger.error({ err: error, uuid }, "Failed to mark user online");
-    }
+    });
 
     safeSend(socket, {
         type: "auth.ok",
@@ -298,14 +319,14 @@ async function handleAuth(
     });
 }
 
-async function handlePing(socket: WebSocket, connections: ConnectionStore) {
+async function handlePing(socket: WebSocket, connections: ConnectionStore, presence: PresenceClient) {
     const state = connections.get(socket);
     if (!state) return;
 
     state.lastSeen = Date.now();
     state.isAlive = true;
     try {
-        await updateLastSeen(state.uuid);
+        await presence.updateLastSeen(state.uuid);
     } catch (error) {
         logger.warn({ err: error, uuid: state.uuid }, "Failed to update last seen");
     }
@@ -316,6 +337,7 @@ async function handleRolesUpdate(
     socket: WebSocket,
     rolesMessage: RolesUpdateMessage,
     connections: ConnectionStore,
+    presence: PresenceClient,
 ) {
     const state = connections.get(socket);
     if (!state) return;
@@ -323,15 +345,9 @@ async function handleRolesUpdate(
     const normalizedRoles = normalizeRoles(rolesMessage.roles);
     state.roles = normalizedRoles;
 
-    try {
-        const client = firestore();
-        await client
-            .collection("users")
-            .doc(state.uuid)
-            .set({ roles: normalizedRoles }, { merge: true });
-    } catch (error) {
+    await presence.updateRoles(state.uuid, normalizedRoles).catch((error) => {
         logger.error({ err: error, uuid: state.uuid }, "Failed to persist updated roles");
-    }
+    });
 
     broadcastToAll(connections, {
         type: "user.roles",
@@ -367,6 +383,7 @@ async function cleanupConnection(
     socket: WebSocket,
     state: ConnectionState | undefined,
     connections: ConnectionStore,
+    presence: PresenceClient,
     reason: string,
     closeCode?: number,
 ) {
@@ -375,11 +392,9 @@ async function cleanupConnection(
     connections.delete(socket);
     state.isAlive = false;
 
-    try {
-        await markOffline(state.uuid);
-    } catch (error) {
+    await presence.markOffline(state.uuid).catch((error) => {
         logger.error({ err: error, uuid: state.uuid }, "Failed to mark user offline");
-    }
+    });
 
     broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
 
@@ -392,8 +407,8 @@ async function cleanupConnection(
     }
 }
 
-function syncStartTime(startTime: number, onPersisted: (value: number) => void) {
-    return persistWebsocketStartTime(startTime)
+function syncStartTime(env: HealthBindings, startTime: number, onPersisted: (value: number) => void) {
+    return persistWebsocketStartTime(env, startTime)
         .then((persisted) => {
             if (typeof persisted === "number") {
                 onPersisted(persisted);
@@ -404,7 +419,12 @@ function syncStartTime(startTime: number, onPersisted: (value: number) => void) 
         });
 }
 
-function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
+function appHeartbeat(
+    connections: ConnectionStore,
+    intervalMs: number,
+    offlineAfterMs: number,
+    presence: PresenceClient,
+) {
     // Keep sockets warm for Cloudflare while still enforcing liveness.
     const keepAlivePayload = JSON.stringify({ type: "server.keepalive" });
     // Cloudflare tends to drop idle sockets quickly, so clamp to <=10s regardless of config.
@@ -418,13 +438,13 @@ function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineA
             const now = Date.now();
             for (const [socket, state] of connections.entries()) {
                 if (socket.readyState !== WebSocket.OPEN) {
-                    await cleanupConnection(socket, state, connections, "socket_not_open", 4001);
+                    await cleanupConnection(socket, state, connections, presence, "socket_not_open", 4001);
                     continue;
                 }
 
                 const inactiveFor = now - state.lastSeen;
                 if (inactiveFor > offlineAfterMs) {
-                    await cleanupConnection(socket, state, connections, "inactivity_timeout", 4400);
+                    await cleanupConnection(socket, state, connections, presence, "inactivity_timeout", 4400);
                     continue;
                 }
 
@@ -434,7 +454,7 @@ function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineA
                         state.lastKeepAliveAt = now;
                     } catch (err) {
                         logger.warn({ err, uuid: state.uuid }, "Failed to send keepalive; closing socket");
-                        await cleanupConnection(socket, state, connections, "keepalive_failed", 4401);
+                        await cleanupConnection(socket, state, connections, presence, "keepalive_failed", 4401);
                     }
                 }
             }
@@ -470,6 +490,15 @@ function json(body: unknown, status = 200) {
             ...corsHeaders,
         },
     });
+}
+
+function normalizeDate(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+        const parsed = Date.parse(value);
+        return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    return undefined;
 }
 
 function isRateLimited(

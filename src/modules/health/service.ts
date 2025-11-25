@@ -1,64 +1,38 @@
-import { getConfig } from "../../core/config.ts";
-import { firestore } from "../../core/firebase.ts";
 import { logger } from "../../core/logger.ts";
 
-const HEALTH_COLLECTION = "health";
+const START_KEY = "health:started_at";
 
-async function readPersistedStartTime(): Promise<number | null> {
-    const client = firestore();
-    const docId = getHealthDocumentId();
+export interface HealthBindings {
+    APP_KV: KVNamespace;
+}
+
+export async function persistWebsocketStartTime(env: HealthBindings, startTimeMs: number): Promise<number> {
     try {
-        const snapshot = await client
-            .collection(HEALTH_COLLECTION)
-            .doc(docId)
-            .get();
-
-        if (!snapshot.exists) {
-            return null;
+        const existingRaw = await env.APP_KV.get(START_KEY);
+        const existing = existingRaw ? Number(existingRaw) : NaN;
+        if (!Number.isNaN(existing) && existing > 0) {
+            // Touch last update without overriding the start time.
+            await env.APP_KV.put(`${START_KEY}:last_update`, Date.now().toString());
+            return existing;
         }
 
-        const data = snapshot.data() as { started_at?: unknown };
-        const raw = typeof data?.started_at === "string" ? data.started_at : null;
-        const parsed = raw ? Date.parse(raw) : Number.NaN;
-        return Number.isNaN(parsed) ? null : parsed;
-    } catch (error) {
-        logger.error({ err: error }, "Failed to read websocket start time from Firestore");
-        return null;
-    }
-}
-
-export async function persistWebsocketStartTime(startTimeMs: number): Promise<number> {
-    const client = firestore();
-    const startedAt = new Date(startTimeMs).toISOString();
-    const now = new Date().toISOString();
-    const docId = getHealthDocumentId();
-    const { env } = getConfig();
-
-    try {
-        await client
-            .collection(HEALTH_COLLECTION)
-            .doc(docId)
-            .set(
-                {
-                    env,
-                    started_at: startedAt,
-                    last_update: now,
-                },
-                { merge: true },
-            );
+        await env.APP_KV.put(START_KEY, String(startTimeMs));
+        await env.APP_KV.put(`${START_KEY}:last_update`, Date.now().toString());
         return startTimeMs;
     } catch (error) {
-        logger.error({ err: error }, "Failed to persist websocket start time to Firestore");
-        const existing = await readPersistedStartTime();
-        return existing ?? startTimeMs;
+        logger.warn({ err: error }, "Failed to persist start time to KV; falling back to runtime value");
+        const fallback = await getPersistedStartTime(env);
+        return fallback ?? startTimeMs;
     }
 }
 
-export async function getPersistedStartTime(): Promise<number | null> {
-    return readPersistedStartTime();
-}
-
-function getHealthDocumentId(): string {
-    const { env } = getConfig();
-    return env === "production" ? "websocket" : `websocket-${env}`;
+export async function getPersistedStartTime(env: HealthBindings): Promise<number | null> {
+    try {
+        const raw = await env.APP_KV.get(START_KEY);
+        const value = raw ? Number(raw) : NaN;
+        return Number.isNaN(value) ? null : value;
+    } catch (error) {
+        logger.warn({ err: error }, "Failed to read start time from KV");
+        return null;
+    }
 }

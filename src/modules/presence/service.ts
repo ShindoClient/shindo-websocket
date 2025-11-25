@@ -1,91 +1,91 @@
-import { firestore } from "../../core/firebase.ts";
-import { logger } from "../../core/logger.ts";
+import type { AllowedRole } from "../gateway/schema.ts";
 import type { AccountType } from "../types/account.ts";
-
-const USERS_COLLECTION = "users";
 
 export interface PresenceRecord {
     uuid: string;
     name: string;
-    roles?: string[];
+    roles?: AllowedRole[];
     accountType: AccountType;
+    ip?: string | null;
 }
 
-export async function markOnline(record: PresenceRecord, rolesToPersist?: string[]) {
-    const client = firestore();
-    const now = new Date().toISOString();
-
-    const payload = {
-        uuid: record.uuid,
-        name: record.name,
-        account_type: record.accountType,
-        online: true,
-        last_join: now,
-        last_seen: now,
-        roles: rolesToPersist ?? record.roles ?? [],
-    };
-
-    try {
-        await client
-            .collection(USERS_COLLECTION)
-            .doc(record.uuid)
-            .set(payload, { merge: true });
-    } catch (error) {
-        logger.error({ err: error, uuid: record.uuid }, "Failed to mark user online");
-        throw error;
-    }
+export interface PresenceSnapshot {
+    uuid: string;
+    name: string;
+    roles: AllowedRole[];
+    accountType: AccountType;
+    online: boolean;
+    last_join?: number;
+    last_seen?: number;
+    last_leave?: number;
 }
 
-export async function updateLastSeen(uuid: string) {
-    const client = firestore();
-    const now = new Date().toISOString();
-
-    try {
-        await client
-            .collection(USERS_COLLECTION)
-            .doc(uuid)
-            .set({ last_seen: now }, { merge: true });
-    } catch (error) {
-        logger.error({ err: error, uuid }, "Failed to update last seen");
-        throw error;
-    }
+export interface PresenceBindings {
+    PRESENCE_DO: DurableObjectNamespace;
 }
 
-export async function markOffline(uuid: string) {
-    const client = firestore();
-    const now = new Date().toISOString();
-
-    try {
-        await client
-            .collection(USERS_COLLECTION)
-            .doc(uuid)
-            .set({
-                online: false,
-                last_leave: now,
-            }, { merge: true });
-    } catch (error) {
-        logger.error({ err: error, uuid }, "Failed to mark user offline");
-        throw error;
-    }
+export interface PresenceClient {
+    markOnline(record: PresenceRecord): Promise<void>;
+    updateLastSeen(uuid: string): Promise<void>;
+    markOffline(uuid: string): Promise<void>;
+    fetchRoles(uuid: string): Promise<AllowedRole[] | undefined>;
+    fetchOnlineUsers(limit?: number): Promise<PresenceSnapshot[]>;
+    countOnlineUsers(): Promise<number>;
+    updateRoles(uuid: string, roles: AllowedRole[]): Promise<void>;
 }
 
-export async function fetchRoles(uuid: string): Promise<string[] | undefined> {
-    const client = firestore();
-    try {
-        const snapshot = await client
-            .collection(USERS_COLLECTION)
-            .doc(uuid)
-            .get();
+export function createPresenceClient(env: PresenceBindings): PresenceClient {
+    const stub = env.PRESENCE_DO.get(env.PRESENCE_DO.idFromName("presence"));
 
-        if (!snapshot.exists) {
-            return undefined;
+    async function post(action: string, payload: Record<string, unknown>) {
+        const res = await stub.fetch("https://presence/event", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: action, payload }),
+        });
+        if (!res.ok) {
+            throw new Error(`Presence DO rejected action ${action}: ${res.status}`);
         }
-
-        const data = snapshot.data() as { roles?: unknown };
-        const roles = Array.isArray(data?.roles) ? data?.roles.filter((role): role is string => typeof role === "string") : undefined;
-        return roles && roles.length ? roles : undefined;
-    } catch (error) {
-        logger.error({ err: error, uuid }, "Failed to fetch user roles from Firestore");
-        throw error;
     }
+
+    return {
+        async markOnline(record) {
+            await post("online", {
+                ...record,
+                roles: record.roles ?? [],
+                last_join: Date.now(),
+                last_seen: Date.now(),
+            });
+        },
+        async updateLastSeen(uuid) {
+            await post("seen", { uuid });
+        },
+        async markOffline(uuid) {
+            await post("offline", { uuid });
+        },
+        async fetchRoles(uuid) {
+            const url = new URL("https://presence/roles");
+            url.searchParams.set("uuid", uuid);
+            const res = await stub.fetch(url.toString());
+            if (!res.ok) return undefined;
+            const payload = await res.json() as { roles?: AllowedRole[] | null };
+            return Array.isArray(payload.roles) ? payload.roles as AllowedRole[] : undefined;
+        },
+        async fetchOnlineUsers(limit = 500) {
+            const res = await stub.fetch("https://presence/snapshot");
+            if (!res.ok) return [];
+            const payload = await res.json() as { users?: PresenceSnapshot[] };
+            const list = Array.isArray(payload.users) ? payload.users : [];
+            return list.slice(0, limit);
+        },
+        async countOnlineUsers() {
+            const res = await stub.fetch("https://presence/count");
+            if (!res.ok) return 0;
+            const payload = await res.json() as { onlineUsers?: number };
+            return typeof payload.onlineUsers === "number" ? payload.onlineUsers : 0;
+        },
+        async updateRoles(uuid, roles) {
+            await post("roles", { uuid, roles });
+        },
+    };
 }

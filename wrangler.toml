@@ -2,6 +2,14 @@ name = "shindo-websocket"
 main = "src/index.ts"
 compatibility_date = "2024-11-06"
 
+[[kv_namespaces]]
+binding = "KV"
+id = "514e2e4009a84d3ab572c1ed9c0fe362"
+
+[[durable_objects.bindings]]
+name = "PRESENCE_DO"
+class_name = "PresenceCoordinator"
+
 [vars]
 WS_PATH = "/websocket"
 WS_HEARTBEAT_INTERVAL = 30000
