@@ -20,10 +20,27 @@ function log(level: LogLevel, message: string, data?: unknown) {
     console[level](`[${level.toUpperCase()}]`, JSON.stringify(payload));
 }
 
+function serializeError(error: Error): Record<string, unknown> {
+    const serialized: Record<string, unknown> = {
+        name: error.name,
+        message: error.message,
+    };
+    if (error.stack) serialized.stack = error.stack;
+    const cause = (error as any).cause;
+    if (cause) serialized.cause = cause instanceof Error ? serializeError(cause) : cause;
+    for (const [key, value] of Object.entries(error)) {
+        serialized[key] = value;
+    }
+    return serialized;
+}
+
 function normalize(data: unknown): Record<string, unknown> {
     if (typeof data !== "object" || data === null) return { data };
     try {
-        return JSON.parse(JSON.stringify(data));
+        return JSON.parse(JSON.stringify(data, (_key, value) => {
+            if (value instanceof Error) return serializeError(value);
+            return value;
+        }));
     } catch {
         return { data: String(data) };
     }
