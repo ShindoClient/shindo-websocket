@@ -167,7 +167,7 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
         }
     });
 
-    socket.addEventListener("close", async () => {
+    socket.addEventListener("close", async (event) => {
         const state = connections.get(socket);
         if (state) {
             connections.delete(socket);
@@ -178,7 +178,7 @@ function handleWebSocket(req: Request, meta: RequestMeta, connections: Connectio
             }
             broadcastToAll(connections, { type: "user.leave", uuid: state.uuid });
         }
-        logger.info({ ip }, "WebSocket connection closed");
+        logger.info({ ip, code: event.code, reason: event.reason, clean: event.wasClean }, "WebSocket connection closed");
     });
 
     socket.addEventListener("error", (err) => {
@@ -368,15 +368,21 @@ function syncStartTime(startTime: number, onPersisted: (value: number) => void) 
 
 function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
     const keepAlivePayload = JSON.stringify({ type: "pong" });
+    const keepAliveEveryMs = Math.min(intervalMs, 10_000); // Cloudflare tends to drop idle sockets >15s
+
     setInterval(async () => {
+        const now = Date.now();
         for (const [socket, state] of connections.entries()) {
-            // Keep the WebSocket active on Cloudflare by sending small frames periodically.
             if (socket.readyState === WebSocket.OPEN) {
-                try {
-                    socket.send(keepAlivePayload);
-                    state.lastSeen = Date.now();
-                } catch (err) {
-                    logger.warn({ err }, "Failed to send keepalive");
+                const sinceLast = now - state.lastSeen;
+                // Proactively send a small frame to keep the tunnel alive.
+                if (sinceLast >= keepAliveEveryMs - 1000) {
+                    try {
+                        socket.send(keepAlivePayload);
+                        state.lastSeen = Date.now();
+                    } catch (err) {
+                        logger.warn({ err }, "Failed to send keepalive");
+                    }
                 }
             }
 
@@ -396,7 +402,7 @@ function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineA
                 }
             }
         }
-    }, intervalMs);
+    }, keepAliveEveryMs);
 }
 
 function isAuthorized(req: Request): boolean {
