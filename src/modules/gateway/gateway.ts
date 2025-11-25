@@ -367,8 +367,19 @@ function syncStartTime(startTime: number, onPersisted: (value: number) => void) 
 }
 
 function appHeartbeat(connections: ConnectionStore, intervalMs: number, offlineAfterMs: number) {
+    const keepAlivePayload = JSON.stringify({ type: "pong" });
     setInterval(async () => {
         for (const [socket, state] of connections.entries()) {
+            // Keep the WebSocket active on Cloudflare by sending small frames periodically.
+            if (socket.readyState === WebSocket.OPEN) {
+                try {
+                    socket.send(keepAlivePayload);
+                    state.lastSeen = Date.now();
+                } catch (err) {
+                    logger.warn({ err }, "Failed to send keepalive");
+                }
+            }
+
             const inactiveFor = Date.now() - state.lastSeen;
             if (inactiveFor > offlineAfterMs) {
                 connections.delete(socket);
