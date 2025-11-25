@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2024-11-06"
 
 [[kv_namespaces]]
-binding = "KV"
+binding = "APP_KV"
 id = "514e2e4009a84d3ab572c1ed9c0fe362"
 
 [[durable_objects.bindings]]
@@ -12,7 +12,7 @@ class_name = "PresenceCoordinator"
 
 [[migrations]]
 tag = "v1-presence-do"
-new_classes = ["PresenceCoordinator"]
+new_sqlite_classes = ["PresenceCoordinator"]
 
 [vars]
 WS_PATH = "/websocket"
