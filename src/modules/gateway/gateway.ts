@@ -38,6 +38,7 @@ type GatewayEnv = EnvBindings & PresenceBindings & HealthBindings;
 export function registerGateway(env: GatewayEnv): Gateway {
     const config = getConfig();
     const presence: PresenceClient = createPresenceClient(env);
+    const warpKv = env.APP_KV;
     const startTime = Date.now();
     let persistedStartTime = startTime;
     let startTimeReady: Promise<void> | null = null;
@@ -190,7 +191,7 @@ function handleWebSocket(
     socket.addEventListener("message", async (event) => {
         try {
             const parsed = clientMessageSchema.parse(JSON.parse(String(event.data)));
-            await handleClientMessage(socket, parsed, connections, presence, env);
+            await handleClientMessage(socket, parsed, connections, presence, warpKv);
             const state = connections.get(socket);
             if (state) {
                 state.lastSeen = Date.now();
@@ -238,7 +239,7 @@ async function handleClientMessage(
     message: ClientMessage,
     connections: ConnectionStore,
     presence: PresenceClient,
-    env: GatewayEnv,
+    warpKv: KVNamespace,
 ) {
     switch (message.type) {
         case "auth":
@@ -251,7 +252,7 @@ async function handleClientMessage(
             await handleRolesUpdate(socket, message, connections, presence);
             break;
         case "warp.status":
-            await handleWarpStatus(socket, message, connections, env);
+            await handleWarpStatus(socket, message, connections, warpKv);
             break;
         default:
             logger.info({ type: (message as any).type }, "Unhandled WebSocket message type");
@@ -262,7 +263,7 @@ async function handleWarpStatus(
     socket: WebSocket,
     message: WarpStatusMessage,
     connections: ConnectionStore,
-    env: HealthBindings,
+    warpKv: KVNamespace,
 ) {
     const state = connections.get(socket);
     if (!state || !state.uuid) {
@@ -291,7 +292,7 @@ async function handleWarpStatus(
     };
 
     try {
-        await env.APP_KV.put(key, JSON.stringify(payload));
+        await warpKv.put(key, JSON.stringify(payload));
     } catch (error) {
         logger.warn({ err: error, uuid: state.uuid }, "Failed to persist warp status to KV");
     }
