@@ -196,6 +196,8 @@ function handleWebSocket(
             if (state) {
                 state.lastSeen = Date.now();
                 state.isAlive = true;
+                // Cliente enviou mensagem, zera o contador de keepalives não respondidos
+                state.unansweredKeepAlives = 0;
             }
         } catch (error) {
             logger.warn({ err: error, raw: String(event.data) }, "WebSocket message rejected");
@@ -351,6 +353,7 @@ async function handleAuth(
         lastKeepAliveAt: Date.now(),
         isAlive: true,
         ip,
+        unansweredKeepAlives: 0,
     };
 
     connections.set(socket, state);
@@ -384,6 +387,8 @@ async function handlePing(socket: WebSocket, connections: ConnectionStore, prese
 
     state.lastSeen = Date.now();
     state.isAlive = true;
+    // Cliente respondeu, zera o contador de keepalives não respondidos
+    state.unansweredKeepAlives = 0;
     try {
         await presence.updateLastSeen(state.uuid);
     } catch (error) {
@@ -488,6 +493,9 @@ function appHeartbeat(
     const keepAlivePayload = JSON.stringify({ type: "server.keepalive" });
     // Cloudflare tends to drop idle sockets quickly, so clamp to <=10s regardless of config.
     const tickEveryMs = Math.max(5_000, Math.min(intervalMs, 10_000));
+    // Máximo de keepalives não respondidos antes de considerar a conexão morta
+    // Se o cliente não responder por 3 keepalives consecutivos (ex: 3 * 10s = 30s), consideramos morto
+    const MAX_UNANSWERED_KEEPALIVES = 3;
     let ticking = false;
 
     const tick = async () => {
@@ -507,10 +515,22 @@ function appHeartbeat(
                     continue;
                 }
 
+                // Se o cliente não respondeu a múltiplos keepalives, considera morto
+                if (state.unansweredKeepAlives >= MAX_UNANSWERED_KEEPALIVES) {
+                    logger.warn(
+                        { uuid: state.uuid, unansweredKeepAlives: state.unansweredKeepAlives },
+                        "Connection appears dead: too many unanswered keepalives",
+                    );
+                    await cleanupConnection(socket, state, connections, presence, "unanswered_keepalives", 4402);
+                    continue;
+                }
+
                 if (now - state.lastKeepAliveAt >= tickEveryMs - 250) {
                     try {
                         socket.send(keepAlivePayload);
                         state.lastKeepAliveAt = now;
+                        // Incrementa o contador de keepalives não respondidos
+                        state.unansweredKeepAlives += 1;
                     } catch (err) {
                         logger.warn({ err, uuid: state.uuid }, "Failed to send keepalive; closing socket");
                         await cleanupConnection(socket, state, connections, presence, "keepalive_failed", 4401);
@@ -566,6 +586,16 @@ function startVerificationLoop(
             for (const [socket, state] of connections.entries()) {
                 if (socket.readyState !== WebSocket.OPEN) {
                     await cleanupConnection(socket, state, connections, presence, "verification_socket_not_open", 4401);
+                    continue;
+                }
+
+                // Se o cliente não respondeu a múltiplos keepalives, considera morto
+                if (state.unansweredKeepAlives >= 3) {
+                    logger.warn(
+                        { uuid: state.uuid, unansweredKeepAlives: state.unansweredKeepAlives },
+                        "Verification failed: connection appears dead (unanswered keepalives)",
+                    );
+                    await cleanupConnection(socket, state, connections, presence, "verification_unanswered_keepalives", 4402);
                     continue;
                 }
 

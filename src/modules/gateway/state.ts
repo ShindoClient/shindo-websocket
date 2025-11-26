@@ -12,6 +12,8 @@ export interface ConnectionState {
     lastKeepAliveAt: number;
     isAlive: boolean;
     ip: string | null;
+    // Contador de keepalives não respondidos (incrementa quando enviamos, zera quando recebemos ping/pong)
+    unansweredKeepAlives: number;
 }
 
 export type ConnectionStore = Map<WebSocket, ConnectionState>;
