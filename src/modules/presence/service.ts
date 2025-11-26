@@ -21,7 +21,8 @@ export interface PresenceSnapshot {
 }
 
 export interface PresenceBindings {
-    PRESENCE_DO: DurableObjectNamespace;
+    // Nova versão do DO de presença
+    PRESENCE_DO_V2: DurableObjectNamespace;
 }
 
 export interface PresenceClient {
@@ -35,7 +36,7 @@ export interface PresenceClient {
 }
 
 export function createPresenceClient(env: PresenceBindings): PresenceClient {
-    const stub = env.PRESENCE_DO.get(env.PRESENCE_DO.idFromName("presence"));
+    const stub = env.PRESENCE_DO_V2.get(env.PRESENCE_DO_V2.idFromName("presence"));
 
     async function post(action: string, payload: Record<string, unknown>) {
         const res = await stub.fetch("https://presence/event", {

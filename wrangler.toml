@@ -7,12 +7,12 @@ binding = "APP_KV"
 id = "514e2e4009a84d3ab572c1ed9c0fe362"
 
 [[durable_objects.bindings]]
-name = "PRESENCE_DO"
-class_name = "PresenceCoordinator"
+name = "PRESENCE_DO_V2"
+class_name = "PresenceCoordinatorV2"
 
 [[migrations]]
-tag = "v1-presence-do"
-new_sqlite_classes = ["PresenceCoordinator"]
+tag = "v2-presence-do"
+new_sqlite_classes = ["PresenceCoordinatorV2"]
 
 [vars]
 WS_PATH = "/websocket"

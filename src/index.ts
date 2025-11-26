@@ -4,7 +4,7 @@ import type { HealthBindings } from "./modules/health/service.ts";
 import type { PresenceBindings } from "./modules/presence/service.ts";
 import { logger } from "./core/logger.ts";
 import type { RequestMeta } from "./modules/gateway/gateway.ts";
-export { PresenceCoordinator } from "./modules/presence/coordinator.ts";
+export { PresenceCoordinatorV2 } from "./modules/presence/coordinator.ts";
 
 export interface Env extends EnvBindings, HealthBindings, PresenceBindings {}
 

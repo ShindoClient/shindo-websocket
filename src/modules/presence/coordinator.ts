@@ -195,3 +195,12 @@ export class PresenceCoordinator implements DurableObject {
         });
     }
 }
+
+/**
+ * Nova versão do Durable Object de presença.
+ *
+ * Mantém exatamente o mesmo comportamento de `PresenceCoordinator`,
+ * mas usa uma classe diferente para podermos criar um novo DO limpo
+ * via nova migration no Wrangler.
+ */
+export class PresenceCoordinatorV2 extends PresenceCoordinator {}
