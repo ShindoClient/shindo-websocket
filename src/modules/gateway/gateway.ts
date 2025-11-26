@@ -198,10 +198,23 @@ function handleWebSocket(
             }
         } catch (error) {
             logger.warn({ err: error, raw: String(event.data) }, "WebSocket message rejected");
+
+            let details: unknown = null;
+            const anyErr = error as any;
+            if (anyErr && Array.isArray(anyErr.issues)) {
+                // ZodError: retornamos as issues para facilitar o debug no client.
+                details = anyErr.issues;
+            } else if (anyErr && typeof anyErr.message === "string") {
+                details = anyErr.message;
+            } else {
+                details = String(error);
+            }
+
             safeSend(socket, {
                 type: "error",
                 code: "INVALID_PAYLOAD",
                 message: "Invalid message payload",
+                details,
             });
         }
     });
