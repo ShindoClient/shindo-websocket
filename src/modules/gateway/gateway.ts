@@ -62,7 +62,7 @@ export function registerGateway(env: GatewayEnv): Gateway {
         const url = new URL(req.url);
 
         if (url.pathname === config.wsPath && req.headers.get("upgrade") === "websocket") {
-            return handleWebSocket(req, meta, connections, presence);
+            return handleWebSocket(req, meta, connections, presence, env);
         }
 
         if (isRateLimited(meta, rateLimitState)) {
@@ -168,6 +168,7 @@ function handleWebSocket(
     meta: RequestMeta,
     connections: ConnectionStore,
     presence: PresenceClient,
+    env: GatewayEnv,
 ): Response {
     const ip = meta.clientIp;
 
