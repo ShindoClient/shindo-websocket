@@ -8,6 +8,7 @@ import {
     type ClientMessage,
     type AuthMessage,
     type RolesUpdateMessage,
+    type WarpStatusMessage,
 } from "./schema.ts";
 import { createPresenceClient, type PresenceClient, type PresenceBindings } from "../presence/service.ts";
 import type { ConnectionStore, ConnectionState } from "./state.ts";
@@ -44,6 +45,7 @@ export function registerGateway(env: GatewayEnv): Gateway {
     const connections: ConnectionStore = new Map();
     const rateLimitState = new Map<string, { count: number; resetAt: number }>();
     appHeartbeat(connections, config.hbInterval, config.offlineAfter, presence);
+    startVerificationLoop(connections, config.verifyIntervalMs, presence);
     startTimeReady = syncStartTime(env, startTime, (value) => {
         persistedStartTime = value;
     });
@@ -188,7 +190,7 @@ function handleWebSocket(
     socket.addEventListener("message", async (event) => {
         try {
             const parsed = clientMessageSchema.parse(JSON.parse(String(event.data)));
-            await handleClientMessage(socket, parsed, connections, presence);
+            await handleClientMessage(socket, parsed, connections, presence, env);
             const state = connections.get(socket);
             if (state) {
                 state.lastSeen = Date.now();
@@ -223,6 +225,7 @@ async function handleClientMessage(
     message: ClientMessage,
     connections: ConnectionStore,
     presence: PresenceClient,
+    env: GatewayEnv,
 ) {
     switch (message.type) {
         case "auth":
@@ -234,8 +237,50 @@ async function handleClientMessage(
         case "roles.update":
             await handleRolesUpdate(socket, message, connections, presence);
             break;
+        case "warp.status":
+            await handleWarpStatus(socket, message, connections, env);
+            break;
         default:
             logger.info({ type: (message as any).type }, "Unhandled WebSocket message type");
+    }
+}
+
+async function handleWarpStatus(
+    socket: WebSocket,
+    message: WarpStatusMessage,
+    connections: ConnectionStore,
+    env: HealthBindings,
+) {
+    const state = connections.get(socket);
+    if (!state || !state.uuid) {
+        return;
+    }
+
+    const key = `warp:status:${state.uuid}`;
+    const now = Date.now();
+
+    const payload = {
+        uuid: state.uuid,
+        name: state.name,
+        accountType: state.accountType,
+        ip: state.ip ?? null,
+        enabled: message.enabled ?? null,
+        status: message.status ?? null,
+        warpMode: message.warpMode ?? null,
+        warpLatency: message.warpLatency ?? null,
+        sessionStartedAt: message.sessionStartedAt ?? null,
+        lookupMs: message.lookupMs ?? null,
+        cacheHit: message.cacheHit ?? null,
+        error: message.error ?? null,
+        resolver: message.resolver ?? null,
+        clientTimestamp: message.timestamp ?? null,
+        serverTimestamp: now,
+    };
+
+    try {
+        await env.APP_KV.put(key, JSON.stringify(payload));
+    } catch (error) {
+        logger.warn({ err: error, uuid: state.uuid }, "Failed to persist warp status to KV");
     }
 }
 
@@ -466,6 +511,85 @@ function appHeartbeat(
     setInterval(() => {
         void tick();
     }, tickEveryMs);
+}
+
+/**
+ * Verificação periódica “profunda” entre o mapa de conexões em memória,
+ * o que está registrado no D1 e o que o cliente realmente está usando.
+ *
+ * - É disparada a cada `verifyIntervalMs` (configurável via Wrangler).
+ * - Se o usuário não existir/estiver offline no D1, a conexão é encerrada.
+ * - Se houver divergência de `name` ou `accountType` entre memória e D1,
+ *   a conexão também é encerrada.
+ * - Para cada cliente válido é enviado um `server.verify`, que o client
+ *   pode usar para responder com um `ping` extra ou re-auth se necessário.
+ */
+function startVerificationLoop(
+    connections: ConnectionStore,
+    verifyIntervalMs: number,
+    presence: PresenceClient,
+) {
+    if (!Number.isFinite(verifyIntervalMs) || verifyIntervalMs <= 0) {
+        return;
+    }
+
+    const interval = Math.max(60_000, verifyIntervalMs); // pelo menos 1 minuto
+
+    let running = false;
+    const run = async () => {
+        if (running) return;
+        running = true;
+        try {
+            // Buscamos um snapshot dos usuários online no D1.
+            const limit = Math.max(100, connections.size || 0);
+            const snapshot = await presence.fetchOnlineUsers(limit).catch((error) => {
+                logger.warn({ err: error }, "Failed to fetch online users for verification");
+                return [];
+            });
+
+            const byUuid = new Map(snapshot.map((u) => [u.uuid, u]));
+
+            for (const [socket, state] of connections.entries()) {
+                if (socket.readyState !== WebSocket.OPEN) {
+                    await cleanupConnection(socket, state, connections, presence, "verification_socket_not_open", 4401);
+                    continue;
+                }
+
+                const row = byUuid.get(state.uuid);
+                if (!row || !row.online) {
+                    logger.warn({ uuid: state.uuid }, "Verification failed: user not marked online in D1");
+                    await cleanupConnection(socket, state, connections, presence, "verification_d1_offline", 4403);
+                    continue;
+                }
+
+                if (row.name !== state.name || row.accountType !== state.accountType) {
+                    logger.warn(
+                        {
+                            uuid: state.uuid,
+                            memory: { name: state.name, accountType: state.accountType },
+                            d1: { name: row.name, accountType: row.accountType },
+                        },
+                        "Verification failed: identity mismatch between client and D1",
+                    );
+                    await cleanupConnection(socket, state, connections, presence, "verification_identity_mismatch", 4403);
+                    continue;
+                }
+
+                // Cliente parece consistente: pedimos uma confirmação extra.
+                safeSend(socket, {
+                    type: "server.verify",
+                    uuid: state.uuid,
+                    lastSeen: state.lastSeen,
+                });
+            }
+        } finally {
+            running = false;
+        }
+    };
+
+    setInterval(() => {
+        void run();
+    }, interval);
 }
 
 function isAuthorized(req: Request): boolean {

@@ -9,6 +9,8 @@ const envSchema = z.object({
     OFFLINE_AFTER_MS: z.coerce.number().int().positive().default(120000),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+    // Em minutos; 0 desativa a verificação periódica profunda contra o D1.
+    VERIFY_INTERVAL_MINUTES: z.coerce.number().int().nonnegative().default(10),
     LOG_LEVEL: z.string().trim().optional(),
     COMMIT_HASH: z.string().trim().optional(),
 }).superRefine((data, ctx) => {
@@ -30,6 +32,7 @@ export interface EnvBindings {
     OFFLINE_AFTER_MS?: string | number;
     RATE_LIMIT_WINDOW_MS?: string | number;
     RATE_LIMIT_MAX?: string | number;
+    VERIFY_INTERVAL_MINUTES?: string | number;
     LOG_LEVEL?: string;
     COMMIT_HASH?: string;
 }
@@ -41,6 +44,7 @@ export interface AppConfig {
     adminKey: string;
     hbInterval: number;
     offlineAfter: number;
+    verifyIntervalMs: number;
     rateLimit: {
         windowMs: number;
         max: number;
@@ -67,6 +71,7 @@ export function loadConfig(env: EnvBindings): AppConfig {
         adminKey: data.ADMIN_KEY,
         hbInterval: data.WS_HEARTBEAT_INTERVAL,
         offlineAfter: data.OFFLINE_AFTER_MS,
+        verifyIntervalMs: Math.max(0, data.VERIFY_INTERVAL_MINUTES * 60_000),
         rateLimit: {
             windowMs: data.RATE_LIMIT_WINDOW_MS,
             max: data.RATE_LIMIT_MAX,

@@ -25,15 +25,31 @@ export const rolesUpdateSchema = z.object({
     roles: z.array(roleSchema).min(1).max(8),
 });
 
+export const warpStatusMessageSchema = z.object({
+    type: z.literal("warp.status"),
+    enabled: z.boolean().optional(),
+    status: z.string().trim().max(32).optional(),
+    warpMode: z.string().trim().max(32).optional(),
+    warpLatency: z.number().int().nonnegative().optional(),
+    sessionStartedAt: z.number().int().nonnegative().optional(),
+    lookupMs: z.number().int().nonnegative().optional(),
+    cacheHit: z.boolean().optional(),
+    error: z.string().trim().max(256).optional(),
+    resolver: z.string().trim().max(256).optional(),
+    timestamp: z.number().int().nonnegative().optional(),
+});
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
     authMessageSchema,
     pingMessageSchema,
     rolesUpdateSchema,
+    warpStatusMessageSchema,
 ]);
 
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 export type AuthMessage = z.infer<typeof authMessageSchema>;
 export type RolesUpdateMessage = z.infer<typeof rolesUpdateSchema>;
+export type WarpStatusMessage = z.infer<typeof warpStatusMessageSchema>;
 
 export const serverAuthOkSchema = z.object({
     type: z.literal("auth.ok"),
