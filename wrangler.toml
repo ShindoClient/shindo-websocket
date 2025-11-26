@@ -11,8 +11,13 @@ name = "PRESENCE_DO_V2"
 class_name = "PresenceCoordinatorV2"
 
 [[migrations]]
-tag = "v2-presence-do"
-new_sqlite_classes = ["PresenceCoordinatorV2"]
+tag = "v3-delete-presence-do"
+deleted_classes = ["PresenceCoordinator","PresenceCoordinatorV2"]
+
+[[d1_databases]]
+binding = "shindo_presence"
+database_name = "shindo_presence"
+database_id = "ad5ea8a1-b15f-419b-ac9e-81b2b2cb1bbc"
 
 [vars]
 WS_PATH = "/websocket"
