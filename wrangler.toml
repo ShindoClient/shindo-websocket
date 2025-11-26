@@ -6,16 +6,12 @@ compatibility_date = "2024-11-06"
 binding = "APP_KV"
 id = "514e2e4009a84d3ab572c1ed9c0fe362"
 
-[[durable_objects.bindings]]
-name = "PRESENCE_DO_V2"
-class_name = "PresenceCoordinatorV2"
-
 [[migrations]]
 tag = "v3-delete-presence-do"
 deleted_classes = ["PresenceCoordinator","PresenceCoordinatorV2"]
 
 [[d1_databases]]
-binding = "shindo_presence"
+binding = "PRESENCE_DB"
 database_name = "shindo_presence"
 database_id = "ad5ea8a1-b15f-419b-ac9e-81b2b2cb1bbc"
 
