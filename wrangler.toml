@@ -21,3 +21,10 @@ WS_HEARTBEAT_INTERVAL = 30000
 OFFLINE_AFTER_MS = 120000
 RATE_LIMIT_WINDOW_MS = 15000
 RATE_LIMIT_MAX = 100
+
+[observability]
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true

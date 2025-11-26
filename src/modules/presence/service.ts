@@ -44,19 +44,28 @@ export interface PresenceClient {
     updateRoles(uuid: string, roles: AllowedRole[]): Promise<void>;
 }
 
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS presence (
-    uuid TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    account_type TEXT NOT NULL,
-    roles TEXT NOT NULL,
-    online INTEGER NOT NULL,
-    last_join INTEGER,
-    last_seen INTEGER,
-    last_leave INTEGER,
-    ip TEXT
-);
-`;
+/**
+ * Esquema esperado para a tabela de presença em D1.
+ *
+ * Por simplicidade e para evitar bugs internos do runtime relacionados a
+ * telemetria de D1, o schema **não** é mais criado automaticamente em tempo
+ * de execução. Em vez disso, crie a tabela uma vez com:
+ *
+ * wrangler d1 execute shindo_presence --command "
+ *   CREATE TABLE IF NOT EXISTS presence (
+ *     uuid TEXT PRIMARY KEY,
+ *     name TEXT NOT NULL,
+ *     account_type TEXT NOT NULL,
+ *     roles TEXT NOT NULL,
+ *     online INTEGER NOT NULL,
+ *     last_join INTEGER,
+ *     last_seen INTEGER,
+ *     last_leave INTEGER,
+ *     ip TEXT
+ *   );
+ * "
+ */
+const SCHEMA_SQL = ""; // mantido apenas para documentação/acoplamento mínimo
 
 function serializeRoles(roles: AllowedRole[] | undefined | null): string {
     return JSON.stringify(Array.isArray(roles) ? roles : []);
@@ -74,15 +83,10 @@ function deserializeRoles(raw: unknown): AllowedRole[] {
 
 export function createPresenceClient(env: PresenceBindings): PresenceClient {
     const db = env.PRESENCE_DB;
-    let ready: Promise<void> | null = null;
-
+    // Schema deve ser criado via CLI (wrangler d1 execute). Não fazemos mais
+    // db.exec() em tempo de request para evitar problemas de telemetria interna.
     async function ensureSchema() {
-        if (!ready) {
-            ready = (async () => {
-                await db.exec(SCHEMA_SQL);
-            })();
-        }
-        return ready;
+        return;
     }
 
     return {
