@@ -10,13 +10,15 @@ export interface AppContext extends Gateway {
     env: EnvBindings & HealthBindings & PresenceBindings;
 }
 
-let cachedContext: Promise<AppContext> | null = null;
-
+/**
+ * Cria um novo contexto de aplicação para **cada** request.
+ *
+ * Em Cloudflare Workers, bindings de I/O (como D1Database, DOs, etc.)
+ * não podem ser reutilizados entre diferentes requests. Por isso,
+ * evitamos cache global de `env` / clients que guardem esses objetos.
+ */
 export function createApp(env: EnvBindings & HealthBindings & PresenceBindings): Promise<AppContext> {
-    if (!cachedContext) {
-        cachedContext = bootstrap(env);
-    }
-    return cachedContext;
+    return bootstrap(env);
 }
 
 async function bootstrap(env: EnvBindings & HealthBindings & PresenceBindings): Promise<AppContext> {
