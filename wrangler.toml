@@ -21,9 +21,7 @@ WS_HEARTBEAT_INTERVAL = 30000
 OFFLINE_AFTER_MS = 120000
 RATE_LIMIT_WINDOW_MS = 15000
 RATE_LIMIT_MAX = 100
-# Intervalo em minutos para rodar a verificação profunda contra o D1.
-# 0 desativa a checagem. Use 10 ou 15, por exemplo.
-VERIFY_INTERVAL_MINUTES = 10
+VERIFY_INTERVAL_MINUTES = 5
 
 [observability]
 [observability.logs]

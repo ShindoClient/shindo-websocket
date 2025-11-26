@@ -557,6 +557,7 @@ function appHeartbeat(
  *   a conexão também é encerrada.
  * - Para cada cliente válido é enviado um `server.verify`, que o client
  *   pode usar para responder com um `ping` extra ou re-auth se necessário.
+ * - Marca como offline usuários que estão no D1 mas não têm conexão ativa.
  */
 function startVerificationLoop(
     connections: ConnectionStore,
@@ -574,6 +575,14 @@ function startVerificationLoop(
         if (running) return;
         running = true;
         try {
+            // Coletamos os UUIDs que estão realmente conectados (com socket aberto)
+            const activeUuids = new Set<string>();
+            for (const [socket, state] of connections.entries()) {
+                if (socket.readyState === WebSocket.OPEN) {
+                    activeUuids.add(state.uuid);
+                }
+            }
+
             // Buscamos um snapshot dos usuários online no D1.
             const limit = Math.max(100, connections.size || 0);
             const snapshot = await presence.fetchOnlineUsers(limit).catch((error) => {
@@ -583,6 +592,7 @@ function startVerificationLoop(
 
             const byUuid = new Map(snapshot.map((u) => [u.uuid, u]));
 
+            // Verifica conexões ativas e marca como offline usuários no D1 sem conexão
             for (const [socket, state] of connections.entries()) {
                 if (socket.readyState !== WebSocket.OPEN) {
                     await cleanupConnection(socket, state, connections, presence, "verification_socket_not_open", 4401);
@@ -625,6 +635,21 @@ function startVerificationLoop(
                     uuid: state.uuid,
                     lastSeen: state.lastSeen,
                 });
+            }
+
+            // Marca como offline usuários que estão no D1 mas não têm conexão ativa
+            for (const user of snapshot) {
+                if (!activeUuids.has(user.uuid)) {
+                    logger.info(
+                        { uuid: user.uuid, name: user.name },
+                        "User marked as online in D1 but has no active connection; marking offline",
+                    );
+                    try {
+                        await presence.markOffline(user.uuid);
+                    } catch (error) {
+                        logger.error({ err: error, uuid: user.uuid }, "Failed to mark orphaned user offline");
+                    }
+                }
             }
         } finally {
             running = false;
